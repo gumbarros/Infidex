@@ -1,4 +1,4 @@
-[![FastDex](https://shields.io/nuget/v/Infidex?v=301)](https://www.nuget.org/packages/Infidex)
+[![FastDex](https://shields.io/nuget/v/Infidex?v=302)](https://www.nuget.org/packages/Infidex)
 
 # Infidex Search Engine
 
