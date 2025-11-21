@@ -21,6 +21,14 @@ A high-performance, hybrid search engine that combines TF-IDF vector space retri
 
 ## Quick Start
 
+Install the library:
+
+```
+dotnet add package infidex
+```
+
+Create an index, add documents, query it:
+
 ```csharp
 using Infidex;
 using Infidex.Core;
