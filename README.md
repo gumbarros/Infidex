@@ -378,7 +378,7 @@ engine.DocumentFieldSchema = fields;
 
 ## Examples
 
-Check out [Infidex.Example](./Infidex.Example) for complete working examples:
+Check out [Infidex.Example](https://github.com/lofcz/Infidex/tree/master/src/Infidex.Example) for complete working examples:
 
 - **MovieExample.cs** - Multi-field movie search with faceting
 - **FilterExample.cs** - Advanced Infiscript filtering
