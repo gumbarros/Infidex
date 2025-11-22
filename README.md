@@ -22,6 +22,8 @@ Infidex is a search engine based on pattern recognition. Learning from your data
 - **Faceted Search** - Build dynamic filters and aggregations
 - **Smart Ranking** - Lexicographic (coverage, quality) scoring for principled relevance
 - **Multi-Field Search** - Search across multiple fields with configurable weights
+- **Incremental Indexing** - Add or update documents without rebuilding the entire index
+- **Fully Thread-Safe** - Multiple concurrent readers, writers block readers and other writers
 - **Production Ready** - Comprehensive test coverage, clean API, zero dependencies
 - **Easy Integration** - Embeds directly into your .NET application
 
@@ -350,6 +352,13 @@ The binary format includes:
 - Document frequencies and statistics
 
 **Index Size**: Typically much smaller than source data due to byte-quantized weights and compressed postings. Example: 40k movie titles = < 5 MB index. See [this test](https://github.com/lofcz/Infidex/blob/a60d3a7753cc4bf48a57a34d14a44bfc0d7a7223/src/Infidex.Tests/PersistenceTests.cs#L77-L175).
+
+## Thread Safety & Concurrency
+
+- `SearchEngine.Search` is thread-safe and can be called from many threads concurrently.
+- Indexing operations (`IndexDocuments`, `IndexDocumentsAsync`, `IndexDocument`, `CalculateWeights`, `Save`, `Load`) acquire an exclusive writer lock and block other operations while they run.
+- Filters and boosts are compiled once and cached in a thread-safe dictionary; execution uses thread-local virtual machines to avoid shared state.
+- Share a single `SearchEngine` instance per application/service and let multiple threads use it concurrently.
 
 ## Configuration
 
