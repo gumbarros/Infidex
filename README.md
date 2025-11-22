@@ -271,11 +271,11 @@ var query = new Query("comedy", maxResults: 20)
 **Stage 2: Per-Term Coverage Analysis**
 - Applied to top-K candidates from Stage 1
 - Tracks **per-term coverage** for each query word using 5 algorithms:
-  - Exact word matching
-  - Fuzzy matching (normalized Levenshtein distance ≤ 0.25)
+  - Exact whole-word matching
+  - Fuzzy word matching (adaptive, length-aware Levenshtein)
   - Joined/split word detection
-  - Prefix/suffix matching (prefix matches weighted higher)
-  - LCS (Longest Common Subsequence) fallback
+  - Prefix/suffix matching (prefixes weighted higher than suffixes)
+  - LCS (Longest Common Subsequence) fallback when no word-level match exists
 - For each query term $q_i$, computes per-term coverage:
 
 $$c_i = \min\left(1, \frac{m_i}{|q_i|}\right)$$
@@ -366,8 +366,7 @@ The binary format includes:
 ```csharp
 var engine = SearchEngine.CreateDefault();
 // - Multi-size n-grams: [2, 3]
-// - Coverage: Enabled (all 5 algorithms)
-// - Fuzzy matching: LD ≤ 1
+// - Coverage: Enabled (multi-algorithm model: exact, LD1 fuzzy, prefix/suffix, join/split, LCS)
 // - Balanced for speed and accuracy
 ```
 
