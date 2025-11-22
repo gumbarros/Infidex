@@ -349,7 +349,7 @@ The binary format includes:
 - TF-IDF weights (pre-normalized, byte-quantized)
 - Document frequencies and statistics
 
-**Index Size**: Typically much smaller than source data due to byte-quantized weights and compressed postings. Example: 40k movie titles = < 5 MB index. See `PersistenceTests.SaveAndLoad40kMovies_MeasureIndexSize`.
+**Index Size**: Typically much smaller than source data due to byte-quantized weights and compressed postings. Example: 40k movie titles = < 5 MB index. See [this test](https://github.com/lofcz/Infidex/blob/a60d3a7753cc4bf48a57a34d14a44bfc0d7a7223/src/Infidex.Tests/PersistenceTests.cs#L77-L175).
 
 ## Configuration
 
