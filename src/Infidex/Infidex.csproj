@@ -45,7 +45,7 @@ Bit-Parallel Levenshtein: Ultra-fast edit distance for strings ≤64 characters<
     </ItemGroup>
 
     <ItemGroup>
-        <None Include="..\README.md">
+        <None Include="..\..\README.md">
             <Pack>True</Pack>
             <PackagePath>\</PackagePath>
         </None>
