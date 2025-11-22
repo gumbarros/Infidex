@@ -294,6 +294,63 @@ $$C_{\text{coord}} = \frac{1}{n} \sum_{i=1}^{n} c_i$$
 $$\text{score} = (\lfloor C_{\text{coord}} \times 63 \rfloor \ll 2) \mid \lfloor Q \times 3 \rfloor$$
 
 
+## Persistence
+
+Infidex supports efficient binary serialization for persisting and loading search indexes:
+
+### Saving an Index
+
+```csharp
+var engine = SearchEngine.CreateDefault();
+
+// Index your documents
+engine.IndexDocuments(documents);
+
+// Save to disk (binary format)
+engine.Save("my-index.bin");
+```
+
+### Loading an Index
+
+```csharp
+// Load from disk with the same configuration
+var engine = SearchEngine.Load(
+    filePath: "my-index.bin",
+    indexSizes: new[] { 3 },
+    startPadSize: 2,
+    stopPadSize: 0,
+    enableCoverage: true
+);
+
+// Search immediately (no re-indexing needed)
+var results = engine.Search("query text", maxResults: 10);
+```
+
+### Async Save/Load
+
+```csharp
+// Save asynchronously
+await engine.SaveAsync("my-index.bin");
+
+// Load asynchronously
+var engine = await SearchEngine.LoadAsync(
+    filePath: "my-index.bin",
+    indexSizes: new[] { 3 },
+    startPadSize: 2,
+    stopPadSize: 0
+);
+```
+
+### What Gets Saved?
+
+The binary format includes:
+- All indexed documents (text, metadata, fields)
+- Complete inverted index (terms and postings)
+- TF-IDF weights (pre-normalized, byte-quantized)
+- Document frequencies and statistics
+
+**Index Size**: Typically much smaller than source data due to byte-quantized weights and compressed postings. Example: 40k movie titles = < 5 MB index. See `PersistenceTests.SaveAndLoad40kMovies_MeasureIndexSize`.
+
 ## Configuration
 
 ### Default Configuration (Recommended)
