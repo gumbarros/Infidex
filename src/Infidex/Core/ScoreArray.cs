@@ -33,7 +33,21 @@ public class ScoreArray
     /// </summary>
     public void Update(long documentId, byte score)
     {
-        // For now, just add - in production, you'd track and remove old scores
+        // Remove any existing occurrences of this document from all buckets,
+        // then add it with the new score.
+        for (int s = 0; s < 256; s++)
+        {
+            List<long> bucket = _buckets[s];
+            for (int i = bucket.Count - 1; i >= 0; i--)
+            {
+                if (bucket[i] == documentId)
+                {
+                    bucket.RemoveAt(i);
+                    Count--;
+                }
+            }
+        }
+
         Add(documentId, score);
     }
     
