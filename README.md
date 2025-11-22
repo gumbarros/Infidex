@@ -17,11 +17,12 @@ Infidex is a search engine based on pattern recognition. Learning from your data
 
 - **Blazingly Fast** - Index thousands of documents per second, search in milliseconds
 - **Intelligent Matching** - Finds what you're looking for even with typos and variations
+- **Per-Term Coverage** - Ranks documents by how many query terms they match (more terms = higher rank)
 - **Rich Filtering** - SQL-like query language (Infiscript) for complex filters
 - **Faceted Search** - Build dynamic filters and aggregations
-- **Smart Ranking** - Boost documents, weight fields, sort by any attribute
+- **Smart Ranking** - Lexicographic (coverage, quality) scoring for principled relevance
 - **Multi-Field Search** - Search across multiple fields with configurable weights
- - **Production Ready** - Comprehensive test coverage, clean API, zero dependencies
+- **Production Ready** - Comprehensive test coverage, clean API, zero dependencies
 - **Easy Integration** - Embeds directly into your .NET application
 
 ## Quick Start
@@ -257,7 +258,7 @@ var query = new Query("comedy", maxResults: 20)
 
 ## How It Works
 
-### Two-Stage Search Pipeline
+### Three-Stage Search Pipeline
 
 **Stage 1: TF-IDF Relevancy Ranking**
 - Tokenizes text into character n-grams (2-grams + 3-grams)
@@ -265,16 +266,31 @@ var query = new Query("comedy", maxResults: 20)
 - Calculates relevancy scores using TF-IDF with L2 normalization
 - Ultra-fast with byte-quantized weights (4x memory savings)
 
-**Stage 2: Coverage Lexical Matching**
-- Applied to top-K candidates
-- 5 matching algorithms working together:
+**Stage 2: Per-Term Coverage Analysis**
+- Applied to top-K candidates from Stage 1
+- Tracks **per-term coverage** for each query word using 5 algorithms:
   - Exact word matching
-  - Fuzzy matching (Levenshtein distance ≤ 1)
+  - Fuzzy matching (normalized Levenshtein distance ≤ 0.25)
   - Joined/split word detection
-  - Prefix/suffix matchin
-  - LCS (Longest Common Subsequence)
+  - Prefix/suffix matching (prefix matches weighted higher)
+  - LCS (Longest Common Subsequence) fallback
+- For each query term $q_i$, computes per-term coverage:
 
-**Score Fusion:** Takes the maximum of both stages for optimal results.
+$$c_i = \min\left(1, \frac{\text{matched\_chars}_i}{|q_i|}\right)$$
+
+- Derives coordination coverage across all $n$ query terms:
+
+$$C_{\text{coord}} = \frac{1}{n} \sum_{i=1}^{n} c_i$$
+
+**Stage 3: Lexicographic Score Fusion**
+- Let $Q \in [0,1]$ be the normalized match quality (max of TF-IDF and coverage scores)
+- Uses **lexicographic ordering** $(C_{\text{coord}}, Q)$:
+  - Documents matching more query terms **always** outrank those matching fewer
+  - Within the same coverage tier, TF-IDF quality $Q$ breaks ties
+- Final score encoded as:
+
+$$\text{score} = (\lfloor C_{\text{coord}} \times 63 \rfloor \ll 2) \mid \lfloor Q \times 3 \rfloor$$
+
 
 ## Configuration
 
