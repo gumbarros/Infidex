@@ -741,6 +741,33 @@ public abstract class MovieSearchParityTestsBase
                 Assert.IsTrue(reloadedIndex < marineIndex, $"The Matrix Reloaded ({reloadedIndex}) should rank higher than The Marine ({marineIndex})");
         }
     }
+
+    [TestMethod]
+    public void AsAm_PrefersAsIAm()
+    {
+        var engine = GetEngine();
+        var movies = GetMovies();
+
+        var result = engine.Search(new Query("as am", 20));
+        var records = result.Records;
+
+        Assert.IsTrue(records.Length > 0, "Expected at least one result for 'as am'.");
+
+        var firstDoc = engine.GetDocument(records[0].DocumentId);
+        Assert.IsNotNull(firstDoc, "First result document should not be null.");
+
+        string firstTitle = firstDoc!.IndexedText;
+        Console.WriteLine("Results for 'as am':");
+        for (int i = 0; i < records.Length && i < 10; i++)
+        {
+            var doc = engine.GetDocument(records[i].DocumentId);
+            Console.WriteLine($"  [{records[i].Score}] {doc!.IndexedText}");
+        }
+
+        // Lock-in: "As I Am" must be the top result for the short, two-word query "as am".
+        Assert.AreEqual("As I Am", firstTitle,
+            "Query 'as am' should prefer the title 'As I Am' that contains both query tokens as whole words.");
+    }
 }
 
 /// <summary>

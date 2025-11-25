@@ -1,12 +1,210 @@
+using System.Runtime.CompilerServices;
+
 namespace Infidex.Metrics;
 
 /// <summary>
 /// Calculates Levenshtein (edit) distance between strings.
-/// Uses bit-parallel algorithm (Myers') for strings ≤64 characters for optimal performance,
-/// and falls back to optimized Fastenshtein algorithm for longer strings.
+/// Includes both Word Levenshtein Distance (WLD) and Prefix Levenshtein Distance (PLD).
+/// 
+/// Based on: "Efficient Fuzzy Search in Large Text Collections" (Bast & Celikik, 2011)
+/// 
+/// Key concepts:
+/// - WLD(w1, w2): Standard edit distance between two complete words
+/// - PLD(p, w): Minimum WLD between prefix p and any prefix of word w
+///   Example: PLD("algro", "algorithm") = 1 because WLD("algro", "algo") = 1
+/// 
+/// The PLD is critical for search-as-you-type scenarios where the query
+/// is an incomplete prefix of the intended word.
 /// </summary>
 public static class LevenshteinDistance
 {
+    /// <summary>
+    /// Dynamic error threshold based on query length.
+    /// From Definition 2.1 in Bast & Celikik (2011):
+    /// - δ = 1 for short words (≤5 chars)
+    /// - δ = 2 for medium words (6-10 chars)
+    /// - δ = 3 for long words (>10 chars)
+    /// 
+    /// This allows more error tolerance on longer queries while
+    /// keeping short queries precise.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static int GetDynamicThreshold(int queryLength)
+    {
+        if (queryLength <= 5) return 1;
+        if (queryLength <= 10) return 2;
+        return 3;
+    }
+    
+    /// <summary>
+    /// Calculates Prefix Levenshtein Distance (PLD) between a query prefix and a word.
+    /// 
+    /// Definition 2.2 (Bast & Celikik): PLD(p, w) is the minimum WLD between p
+    /// and any prefix of w.
+    /// 
+    /// Algorithm: Fill only cells within δ of the main diagonal (gray cells in paper's Table I),
+    /// then take the minimum value in the last row.
+    /// 
+    /// Time complexity: O(δ · |w|) - much faster than O(|p| · |w|) for full matrix
+    /// </summary>
+    /// <param name="prefix">The query prefix (what user has typed)</param>
+    /// <param name="word">The dictionary word to match against</param>
+    /// <param name="maxErrors">Maximum errors to consider (δ)</param>
+    /// <param name="ignoreCase">Whether to ignore case differences</param>
+    /// <returns>The minimum edit distance between prefix and any prefix of word</returns>
+    public static int CalculatePrefixDistance(
+        ReadOnlySpan<char> prefix, 
+        ReadOnlySpan<char> word, 
+        int maxErrors = int.MaxValue,
+        bool ignoreCase = true)
+    {
+        if (prefix.IsEmpty) return 0;
+        if (word.IsEmpty) return prefix.Length;
+        
+        int m = prefix.Length;  // Query prefix length
+        int n = word.Length;    // Word length
+        
+        // Use dynamic threshold if not specified
+        if (maxErrors == int.MaxValue)
+        {
+            maxErrors = GetDynamicThreshold(m);
+        }
+        
+        // Optimization: If word is shorter than prefix by more than δ,
+        // the minimum PLD is at least (m - n) which may exceed threshold
+        if (m - n > maxErrors) return maxErrors + 1;
+        
+        // Allocate the cost array for the band (only cells within δ of diagonal)
+        // We use a single row and update it in place
+        int bandwidth = 2 * maxErrors + 1;
+        Span<int> costs = bandwidth < 512 ? stackalloc int[bandwidth] : new int[bandwidth];
+        
+        // Initialize: costs[k] represents distance at diagonal offset (k - maxErrors)
+        for (int k = 0; k < bandwidth; k++)
+        {
+            int diagonalOffset = k - maxErrors;
+            if (diagonalOffset < 0)
+                costs[k] = -diagonalOffset; // Deletion cost from empty prefix
+            else if (diagonalOffset == 0)
+                costs[k] = 0;
+            else
+                costs[k] = maxErrors + 1; // Out of band
+        }
+        
+        int minPLD = m; // Track minimum in last row
+        
+        // Process each character of the word (columns in DP matrix)
+        for (int j = 0; j < n; j++)
+        {
+            char wChar = word[j];
+            if (ignoreCase) wChar = char.ToLowerInvariant(wChar);
+            
+            // Track minimum for this column (for prefix distance)
+            int colMin = maxErrors + 1;
+            
+            // Process the band for this column
+            int prevDiag = costs[0];
+            
+            for (int k = 0; k < bandwidth; k++)
+            {
+                int i = j + (k - maxErrors); // Row index in full matrix
+                
+                if (i < 0 || i > m)
+                {
+                    if (k > 0) prevDiag = costs[k];
+                    continue;
+                }
+                
+                int newCost;
+                
+                if (i == 0)
+                {
+                    // First row: insertions only
+                    newCost = j + 1;
+                }
+                else
+                {
+                    char pChar = prefix[i - 1];
+                    if (ignoreCase) pChar = char.ToLowerInvariant(pChar);
+                    
+                    int substitutionCost = (pChar == wChar) ? 0 : 1;
+                    
+                    // Get costs from neighbors (within band)
+                    int diagCost = prevDiag + substitutionCost;
+                    int leftCost = (k > 0) ? costs[k - 1] + 1 : maxErrors + 2; // Insertion
+                    int upCost = costs[k] + 1; // Deletion
+                    
+                    newCost = Math.Min(diagCost, Math.Min(leftCost, upCost));
+                }
+                
+                prevDiag = costs[k];
+                costs[k] = Math.Min(newCost, maxErrors + 1);
+                
+                // Track minimum in the last row (when i == m)
+                if (i == m && costs[k] < colMin)
+                {
+                    colMin = costs[k];
+                }
+            }
+            
+            // Update global minimum PLD (minimum across all columns in last row)
+            if (colMin < minPLD)
+            {
+                minPLD = colMin;
+            }
+            
+            // Early termination: if all values in band exceed threshold, no match possible
+            bool allExceedThreshold = true;
+            for (int k = 0; k < bandwidth; k++)
+            {
+                if (costs[k] <= maxErrors)
+                {
+                    allExceedThreshold = false;
+                    break;
+                }
+            }
+            if (allExceedThreshold && j >= maxErrors)
+            {
+                return maxErrors + 1;
+            }
+        }
+        
+        // The PLD is the minimum value in the last row (m-th row)
+        // We've been tracking this in minPLD
+        return minPLD;
+    }
+    
+    /// <summary>
+    /// Overload for string inputs.
+    /// </summary>
+    public static int CalculatePrefixDistance(string prefix, string word, int maxErrors = int.MaxValue)
+    {
+        return CalculatePrefixDistance(prefix.AsSpan(), word.AsSpan(), maxErrors);
+    }
+    
+    /// <summary>
+    /// Checks if a word is a "fuzzy completion" of a prefix within the dynamic threshold.
+    /// A word w is a fuzzy completion of prefix p if PLD(p, w) ≤ δ(|p|).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool IsFuzzyCompletion(ReadOnlySpan<char> prefix, ReadOnlySpan<char> word)
+    {
+        int threshold = GetDynamicThreshold(prefix.Length);
+        return CalculatePrefixDistance(prefix, word, threshold) <= threshold;
+    }
+    
+    /// <summary>
+    /// Checks if two words are similar within the dynamic threshold.
+    /// Uses WLD (full word Levenshtein distance).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool IsSimilarWord(ReadOnlySpan<char> word1, ReadOnlySpan<char> word2)
+    {
+        int maxLen = Math.Max(word1.Length, word2.Length);
+        int threshold = GetDynamicThreshold(maxLen);
+        return Calculate(word1, word2, threshold) <= threshold;
+    }
+
     /// <summary>
     /// Calculates Levenshtein distance using Span to avoid allocations.
     /// Uses stack-allocated memory for short strings.

@@ -92,10 +92,11 @@ public class Tokenizer
             words = text.Split(TokenizerSetup.Delimiters, StringSplitOptions.RemoveEmptyEntries);
         }
         
-        // Apply normalization
+        // Apply full normalization for search (same as indexing) to enable accent-insensitive matching.
+        // This ensures "sciozl" matches "scioškolazlín" because both get normalized to "scioskola zlin".
         if (TextNormalizer != null)
         {
-            text = TextNormalizer.ReplaceStrings(text);
+            text = TextNormalizer.Normalize(text);
         }
         
         // Handle high-resolution mode

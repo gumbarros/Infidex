@@ -40,7 +40,9 @@ public sealed class AffixIndex : IDisposable
         foreach (string word in words)
         {
             int length = word.Length;
-            if (length >= _minLength && length <= _maxLength)
+            // Index all words with at least minLength chars (not restricted by maxLength).
+            // The maxLength only controls the prefix/suffix lengths generated, not the word length.
+            if (length >= _minLength)
             {
                 LoadWord(word, docIndex);
             }

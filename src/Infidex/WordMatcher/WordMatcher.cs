@@ -1,6 +1,7 @@
 using Infidex.Core;
 using Infidex.Filtering;
 using Infidex.Metrics;
+using Infidex.Tokenization;
 
 namespace Infidex.WordMatcher;
 
@@ -15,12 +16,14 @@ public sealed class WordMatcher : IDisposable
     private readonly AffixIndex? _affixIndex;
     private readonly char[] _delimiters;
     private readonly WordMatcherSetup _setup;
+    private readonly TextNormalizer? _textNormalizer;
     private bool _disposed;
     
-    public WordMatcher(WordMatcherSetup setup, char[] delimiters)
+    public WordMatcher(WordMatcherSetup setup, char[] delimiters, TextNormalizer? textNormalizer = null)
     {
         _setup = setup;
         _delimiters = delimiters;
+        _textNormalizer = textNormalizer;
         _exactIndex = new Dictionary<string, HashSet<int>>();
         _ld1Index = new Dictionary<string, HashSet<int>>();
         
@@ -51,17 +54,23 @@ public sealed class WordMatcher : IDisposable
     /// </summary>
     public void Load(string text, int docIndex)
     {
-        string[] words = text.Split(_delimiters, StringSplitOptions.RemoveEmptyEntries);
+        // Apply full normalization (including accent removal) for consistent matching
+        string normalizedText = text.ToLowerInvariant();
+        if (_textNormalizer != null)
+        {
+            normalizedText = _textNormalizer.Normalize(normalizedText);
+        }
+        
+        string[] words = normalizedText.Split(_delimiters, StringSplitOptions.RemoveEmptyEntries);
         
         foreach (string word in words)
         {
-            string normalized = word.ToLowerInvariant();
-            int length = normalized.Length;
+            int length = word.Length;
             
             // Exact word index
             if (length >= _setup.MinimumWordSizeExact && length <= _setup.MaximumWordSizeExact)
             {
-                AddToIndex(_exactIndex, normalized, docIndex);
+                AddToIndex(_exactIndex, word, docIndex);
             }
             
             // LD1 index - generate all words within edit distance 1
@@ -69,14 +78,14 @@ public sealed class WordMatcher : IDisposable
                 length >= _setup.MinimumWordSizeLD1 && 
                 length <= _setup.MaximumWordSizeLD1)
             {
-                GenerateLD1Variants(normalized, docIndex);
+                GenerateLD1Variants(word, docIndex);
             }
         }
         
         // Affix index
         if (_affixIndex != null)
         {
-            _affixIndex.LoadSentence(text.ToLowerInvariant(), docIndex);
+            _affixIndex.LoadSentence(normalizedText, docIndex);
         }
     }
     
@@ -87,6 +96,10 @@ public sealed class WordMatcher : IDisposable
     {
         HashSet<int> results = [];
         string normalized = query.ToLowerInvariant();
+        if (_textNormalizer != null)
+        {
+            normalized = _textNormalizer.Normalize(normalized);
+        }
         int length = normalized.Length;
 
         // 1. Exact match
@@ -141,7 +154,12 @@ public sealed class WordMatcher : IDisposable
     public HashSet<int> LookupAffix(string query, FilterMask? filter = null)
     {
         HashSet<int> results = [];
-        _affixIndex?.Lookup(query.ToLowerInvariant(), filter, results);
+        string normalized = query.ToLowerInvariant();
+        if (_textNormalizer != null)
+        {
+            normalized = _textNormalizer.Normalize(normalized);
+        }
+        _affixIndex?.Lookup(normalized, filter, results);
         return results;
     }
     
