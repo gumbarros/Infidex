@@ -141,6 +141,8 @@ public sealed class AffixIndex : IDisposable
         
         _disposed = true;
     }
+    
+    ~AffixIndex() => Dispose(false);
 }
 
 
