@@ -268,7 +268,7 @@ $$\text{BM25+}(q, d) = \sum_{t \in q} \text{IDF}(t) \cdot \left( \frac{f(t,d) \c
 - Applied to top-K candidates from Stage 1
 - Tracks **per-term coverage** for each query word using 5 algorithms:
   - Exact whole-word matching
-  - Fuzzy word matching (adaptive Damerau-Levenshtein, max 2 edits)
+  - Fuzzy word matching (adaptive Damerau-Levenshtein)
   - Joined/split word detection
   - Prefix/suffix matching (prefixes weighted higher than suffixes)
   - LCS (Longest Common Subsequence) fallback when no word-level match exists
@@ -321,7 +321,7 @@ $$L_{\text{lex}} = \max\left( L_{\text{substr}}, L_{\text{prefix}}, L_{\text{fuz
 
 - $L_{\text{substr}}$: Substring containment score (position-weighted)
 - $L_{\text{prefix}}$: Longest prefix of doc token matching suffix of query
-- $L_{\text{fuzzy}}$: Damerau-Levenshtein similarity (transpositions allowed, max 2 edits)
+- $L_{\text{fuzzy}}$: Damerau-Levenshtein similarity (transpositions allowed)
 - $L_{\text{2seg}}$: Two-segment alignment for concatenated queries
 
 **For multi-term queries:**
