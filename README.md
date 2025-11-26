@@ -249,7 +249,7 @@ var query = new Query("comedy", maxResults: 20)
 
 ## How It Works
 
-Infidex uses a **data-agnostic lexicographic ranking model** that relies entirely on structural and positional properties of the match—no collection statistics (like IDF) influence the final ranking. This ensures explainable, intuitive results regardless of the corpus.
+Infidex uses a **data-agnostic lexicographic ranking model** that relies entirely on structural and positional properties of the match, no collection statistics (like IDF) influence the final ranking. This ensures explainable, intuitive results regardless of the corpus.
 
 ### Three-Stage Search Pipeline
 
@@ -265,16 +265,23 @@ $$\text{BM25+}(q, d) = \sum_{t \in q} \text{IDF}(t) \cdot \left( \frac{f(t,d) \c
 - Produces top-K candidates for Stage 2 refinement
 
 Formally, let $V$ be the set of all indexed terms over alphabet $\Sigma$. Infidex builds a deterministic finite-state transducer
-\[
+
+$$
 T = (Q, \Sigma, \delta, q_0, F, \mu)
-\]
+$$
+
 such that for each $t \in V$ there is a unique path from $q_0$ to some $q \in F$ labeled by $t$, and $\mu(t) \in \mathbb{N}$ is a term identifier.  
 Prefix and suffix queries are then evaluated as:
-\[
- \text{Pref}(p) = \{\mu(t) : t \in V,\ t \text{ has prefix } p\}, \qquad
- \text{Suff}(s) = \{\mu(t) : t \in V,\ t \text{ has suffix } s\},
-\]
-with time complexity $O(|p| + |\text{Pref}(p)|)$ and $O(|s| + |\text{Suff}(s)|)$, respectively.
+
+$$
+\mathrm{Pref}(p) = \{\mu(t) \mid t \in V,\ t \text{ has prefix } p\}
+$$
+
+$$
+\mathrm{Suff}(s) = \{\mu(t) \mid t \in V,\ t \text{ has suffix } s\}
+$$
+
+with time complexity $O(|p| + |\mathrm{Pref}(p)|)$ and $O(|s| + |\mathrm{Suff}(s)|)$, respectively.
 
 **Stage 2: Lexical Coverage Analysis**
 - Applied to top-K candidates from Stage 1
@@ -298,13 +305,15 @@ $$C_{\text{coord}} = \frac{1}{n} \sum_{i=1}^{n} c_i$$
 
 **Stage 3: Lexicographic Score Fusion**
 
-The final score is a **lexicographic tuple** encoded into a 16-bit `ushort`:
+The final **ordering** is a lexicographic triple $(\text{Precedence}, \text{Semantic}, \tau)$, where $\tau$ is an 8-bit tiebreaker.  
+Precedence and Semantic are encoded into a 16-bit `ushort`:
 
 $$\text{score} = (\text{Precedence} \ll 8) + \text{Semantic}$$
 
 where:
 - **Precedence** (high byte, 8 bits): Discrete match-quality tiers
 - **Semantic** (low byte, 8 bits): Continuous similarity within a tier
+- **Tiebreaker** $\tau \in [0,255]$: Additional ordering signal used only when both Precedence and Semantic are equal (e.g., derived from word hits or LCS features)
 
 #### Precedence Hierarchy
 
@@ -373,11 +382,12 @@ This is a pure positional/string rule—no rarity or IDF is used.
 
 #### Final Score Encoding
 
-The 16-bit score is computed as:
+The 16-bit score component is computed as:
 
 $$\text{score} = (\text{Prec} \ll 8) + \lfloor S \times 255 \rfloor$$
 
-where $S \in [0, 1]$ is the semantic score and $\text{Prec} \in [0, 255]$ is the precedence bitmask.
+where $S \in [0, 1]$ is the semantic score and $\text{Prec} \in [0, 255]$ is the precedence bitmask.  
+The overall ranking key is then the triple $(\text{Prec}, \lfloor S \times 255 \rfloor, \tau)$ ordered lexicographically.
 
 This ensures:
 1. **Completeness dominates** (all terms found beats partial matches)
@@ -438,6 +448,16 @@ The binary format includes:
 - Complete inverted index (terms and postings)
 - TF-IDF weights (pre-normalized, byte-quantized)
 - Document frequencies and statistics
+- The FST term index for exact/prefix/suffix lookups
+- The short-query prefix index (positional postings for 1–3 character prefixes)
+- WordMatcher indices (exact words, LD1 deletions, and affix FST)
+
+On disk, the file is laid out as:
+- A fixed-size header (magic, format version, flags, document count, term count, header checksum computed via a simple CRC-style function)
+- A length-prefixed data block containing documents, terms, FST, and short-query index, plus a CRC32-style checksum for that block
+- A trailing section with the serialized `WordMatcher` data
+
+The header and data block are sufficient to fully reconstruct the `VectorModel`; the trailing section is only used to restore the `WordMatcher`.
 
 **Index Size**: Typically much smaller than source data due to byte-quantized weights and compressed postings. Example: 40k movie titles = < 5 MB index. See [this test](https://github.com/lofcz/Infidex/blob/a60d3a7753cc4bf48a57a34d14a44bfc0d7a7223/src/Infidex.Tests/PersistenceTests.cs#L77-L175).
 
@@ -493,11 +513,16 @@ var engine = new SearchEngine(
 
 ## Testing
 
-Comprehensive test suite with 300+ tests:
+Infidex ships with a comprehensive test suite of 400+ tests, including:
+- Query relevancy tests on morphologically diverse languages (currently English and Czech) without any dataset-specific tuning
+- Concurrency tests exercising parallel search, indexing, and save/load patterns
+- Persistence, performance, and core API behavior tests
 
 ```bash
 dotnet test
 ```
+
+Contributions of additional query relevancy tests from speakers of other languages are very welcome, especially for languages with rich morphology or non-Latin scripts. These tests help keep the ranking model language-agnostic and robust without per-dataset tweaks.
 
 ## API Reference
 
