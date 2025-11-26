@@ -217,7 +217,7 @@ public static class PackedBitParallelLcs
         if (queryWords.Length == 0 || document.IsEmpty)
             return 0f;
         
-        var lcsResult = ComputePackedLcs(queryWords, document);
+        PackedLcsResult lcsResult = ComputePackedLcs(queryWords, document);
         if (lcsResult.TotalLcs == 0)
             return 0f;
         
@@ -285,7 +285,7 @@ public static class PackedBitParallelLcs
         if (queryWords.Length == 0 || document.IsEmpty)
             return 0f;
         
-        var lcsResult = ComputePackedLcs(queryWords, document);
+        PackedLcsResult lcsResult = ComputePackedLcs(queryWords, document);
         if (lcsResult.MatchedWords == 0)
             return 0f;
         

@@ -257,7 +257,7 @@ public static class AutocompleteScoring
         // Ensure a is the shorter string for space efficiency
         if (a.Length > b.Length)
         {
-            var temp = a;
+            ReadOnlySpan<char> temp = a;
             a = b;
             b = temp;
         }
@@ -290,7 +290,7 @@ public static class AutocompleteScoring
                 }
                 
                 // Swap rows
-                var temp = prev;
+                int[] temp = prev;
                 prev = curr;
                 curr = temp;
             }
@@ -418,4 +418,5 @@ public static class AutocompleteScoring
         }
     }
 }
+
 

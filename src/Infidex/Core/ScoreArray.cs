@@ -2,11 +2,12 @@ namespace Infidex.Core;
 
 /// <summary>
 /// Bucket-based score storage that provides O(1) insertion and O(n) top-K retrieval.
-/// Supports scores 0-65535 (ushort). Optimized for sparse data using range tracking.
+/// Supports scores 0-65535 (ushort) with an additional 8-bit tiebreaker for ordering within buckets.
+/// Optimized for sparse data using range tracking.
 /// </summary>
 public class ScoreArray
 {
-    private readonly List<long>?[] _buckets;
+    private readonly List<(long DocId, byte Tiebreaker)>?[] _buckets;
     // Optimization: Bitmap to track active buckets. 
     // 65536 bits = 8192 bytes = 1024 ulongs. Fits in L1 cache.
     // Allows GetTopK to skip empty buckets without accessing the large pointer array.
@@ -18,7 +19,7 @@ public class ScoreArray
     {
         // Create 65536 buckets (one for each possible ushort value)
         // Lazy initialization: array of nulls
-        _buckets = new List<long>?[65536];
+        _buckets = new List<(long, byte)>?[65536];
         _activeBucketsBitmap = new ulong[1024]; // 65536 / 64
         Count = 0;
     }
@@ -26,16 +27,16 @@ public class ScoreArray
     /// <summary>
     /// Adds a document with its score. O(1) operation.
     /// </summary>
-    public void Add(long documentId, ushort score)
+    public void Add(long documentId, ushort score, byte tiebreaker = 0)
     {
         if (_buckets[score] == null)
         {
-            _buckets[score] = new List<long>();
+            _buckets[score] = [];
             // Set bit in bitmap
             _activeBucketsBitmap[score >> 6] |= (1UL << (score & 63));
         }
         
-        _buckets[score]!.Add(documentId);
+        _buckets[score]!.Add((documentId, tiebreaker));
         Count++;
         
         if (score > _maxScore) _maxScore = score;
@@ -48,7 +49,7 @@ public class ScoreArray
     /// For ScoreArray usage pattern (re-scoring), we often just Add.
     /// Update logic assumes we might need to remove from old bucket.
     /// </summary>
-    public void Update(long documentId, ushort score)
+    public void Update(long documentId, ushort score, byte tiebreaker = 0)
     {
         // Remove any existing occurrences of this document from all active buckets
         // Optimization: scan only within known range
@@ -62,7 +63,7 @@ public class ScoreArray
                 {
                     for (int i = bucket.Count - 1; i >= 0; i--)
                     {
-                        if (bucket[i] == documentId)
+                        if (bucket[i].DocId == documentId)
                         {
                             bucket.RemoveAt(i);
                             Count--;
@@ -72,20 +73,20 @@ public class ScoreArray
             }
         }
 
-        Add(documentId, score);
+        Add(documentId, score, tiebreaker);
     }
     
     /// <summary>
     /// Gets the top K results by iterating from highest score to lowest.
+    /// Within each score bucket, entries are sorted by tiebreaker (higher first).
     /// O(n) operation but extremely fast due to bucket structure.
-    /// Optimized to use bit operations for skipping empty buckets.
     /// </summary>
     public ScoreEntry[] GetTopK(int k)
     {
-        List<ScoreEntry> results = new List<ScoreEntry>();
+        List<ScoreEntry> results = [];
         
         if (Count == 0 || _maxScore < 0)
-            return Array.Empty<ScoreEntry>();
+            return [];
             
         int maxChunkIndex = _maxScore >> 6;
         int minChunkIndex = _minScore >> 6;
@@ -97,30 +98,30 @@ public class ScoreArray
             if (chunk == 0) continue;
 
             // Iterate bits in the chunk from high (63) to low (0)
-            // Score = (i * 64) + bitIndex
-            // We check bits down to 0 or until minScore is reached
-            
-            // Optimization: Use TrailingZeroCount/LeadingZeroCount could be faster, 
-            // but manual loop is simple and correct for endianness logic here.
-            // Since we need high-to-low, we check bit 63 down to 0.
             for (int bit = 63; bit >= 0; bit--)
             {
                 if ((chunk & (1UL << bit)) != 0)
                 {
                     int score = (i << 6) | bit;
                     
-                    // Respect bounds (though bitmap should handle this mostly)
                     if (score > _maxScore) continue; 
-                    if (score < _minScore) break; // Passed minimum, stop
+                    if (score < _minScore) break;
 
                     var bucket = _buckets[score];
-                    if (bucket != null)
+                    if (bucket != null && bucket.Count > 0)
                     {
-                        foreach (long docId in bucket)
+                        // Sort bucket by tiebreaker descending (higher = better)
+                        // This is typically a small list, so sorting is fast
+                        if (bucket.Count > 1)
                         {
-                            results.Add(new ScoreEntry((ushort)score, docId));
+                            bucket.Sort((a, b) => b.Tiebreaker.CompareTo(a.Tiebreaker));
+                        }
+                        
+                        foreach (var (docId, tiebreaker) in bucket)
+                        {
+                            results.Add(new ScoreEntry((ushort)score, docId, tiebreaker));
                             if (results.Count >= k)
-                                goto Done; // Break out of all loops
+                                goto Done;
                         }
                     }
                 }

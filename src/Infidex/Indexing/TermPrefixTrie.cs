@@ -11,12 +11,11 @@ namespace Infidex.Indexing;
 /// </summary>
 internal sealed class TermPrefixTrie
 {
-    private readonly Node _root = new();
-    private int _termCount;
-    
+    private readonly Node _root = new Node();
+
     /// <summary>Number of terms indexed in the trie.</summary>
-    public int TermCount => _termCount;
-    
+    public int TermCount { get; private set; }
+
     /// <summary>
     /// Adds a term to the trie.
     /// </summary>
@@ -33,7 +32,7 @@ internal sealed class TermPrefixTrie
         // Store term at leaf (may have multiple terms with same text from different shingle sizes)
         current.Terms ??= new List<Term>(1);
         current.Terms.Add(term);
-        _termCount++;
+        TermCount++;
     }
     
     /// <summary>
@@ -56,7 +55,7 @@ internal sealed class TermPrefixTrie
         }
         
         // Collect all terms in subtree
-        foreach (var term in CollectTerms(current))
+        foreach (Term term in CollectTerms(current))
         {
             yield return term;
         }
@@ -88,33 +87,33 @@ internal sealed class TermPrefixTrie
     {
         _root.Children?.Clear();
         _root.Terms?.Clear();
-        _termCount = 0;
+        TermCount = 0;
     }
     
     private static IEnumerable<Term> CollectTerms(Node node)
     {
         // Yield terms at this node
         // Take snapshot to avoid "collection modified during enumeration" if trie is being rebuilt
-        var terms = node.Terms;
+        List<Term>? terms = node.Terms;
         if (terms != null)
         {
             // Snapshot the list to avoid concurrent modification issues
             Term[] termsSnapshot = terms.ToArray();
-            foreach (var term in termsSnapshot)
+            foreach (Term term in termsSnapshot)
             {
                 yield return term;
             }
         }
         
         // Recursively collect from children
-        var children = node.Children;
+        Dictionary<char, Node>? children = node.Children;
         if (children != null)
         {
             // Snapshot the values to avoid concurrent modification issues
             Node[] childrenSnapshot = children.Values.ToArray();
-            foreach (var child in childrenSnapshot)
+            foreach (Node child in childrenSnapshot)
             {
-                foreach (var term in CollectTerms(child))
+                foreach (Term term in CollectTerms(child))
                 {
                     yield return term;
                 }

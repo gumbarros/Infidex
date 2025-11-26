@@ -220,7 +220,7 @@ public static class LevenshteinDistance
         // Ensure pattern is the shorter one to minimize row size
         if (pattern.Length > text.Length)
         {
-            var temp = pattern;
+            ReadOnlySpan<char> temp = pattern;
             pattern = text;
             text = temp;
         }
@@ -353,8 +353,8 @@ public static class LevenshteinDistance
                         int remainingBudget = maxDistance - 1;
                         if (remainingBudget < 0) return maxDistance + 1;
                         
-                        var sRest = (i + 2 < len) ? source.Slice(i + 2) : ReadOnlySpan<char>.Empty;
-                        var tRest = (i + 2 < target.Length) ? target.Slice(i + 2) : ReadOnlySpan<char>.Empty;
+                        ReadOnlySpan<char> sRest = (i + 2 < len) ? source.Slice(i + 2) : ReadOnlySpan<char>.Empty;
+                        ReadOnlySpan<char> tRest = (i + 2 < target.Length) ? target.Slice(i + 2) : ReadOnlySpan<char>.Empty;
                         
                         int restDist = Calculate(sRest, tRest, remainingBudget, ignoreCase);
                         

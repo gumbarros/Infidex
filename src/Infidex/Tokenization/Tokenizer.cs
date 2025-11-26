@@ -275,7 +275,7 @@ public class Tokenizer
             return [];
         
         string[] words = text.Split(TokenizerSetup.Delimiters, StringSplitOptions.RemoveEmptyEntries);
-        List<(string Word, int Position)> result = new();
+        List<(string Word, int Position)> result = [];
         
         for (int i = 0; i < words.Length; i++)
         {

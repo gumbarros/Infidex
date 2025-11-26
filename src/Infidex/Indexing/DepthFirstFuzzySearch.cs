@@ -28,7 +28,7 @@ namespace Infidex.Indexing;
 /// </summary>
 public sealed class DepthFirstFuzzySearch
 {
-    private readonly TrieNode _root = new();
+    private readonly TrieNode _root = new TrieNode();
     private int _termCount;
     
     /// <summary>Number of terms indexed.</summary>
@@ -47,7 +47,7 @@ public sealed class DepthFirstFuzzySearch
         public TrieNode GetOrCreateChild(char c)
         {
             Children ??= new Dictionary<char, TrieNode>();
-            if (!Children.TryGetValue(c, out var child))
+            if (!Children.TryGetValue(c, out TrieNode? child))
             {
                 child = new TrieNode();
                 Children[c] = child;
@@ -110,7 +110,7 @@ public sealed class DepthFirstFuzzySearch
             current = current.GetOrCreateChild(c);
         }
         
-        current.Completions ??= new List<(string, float, Term?)>();
+        current.Completions ??= [];
         current.Completions.Add((term, score, termObj));
         _termCount++;
     }
@@ -148,25 +148,25 @@ public sealed class DepthFirstFuzzySearch
         int queryLen = queryLower.Length;
         
         // Priority queue: min-heap by (PED, -depth)
-        var heap = new PriorityQueue<MatchingNode, float>();
+        PriorityQueue<MatchingNode, float> heap = new PriorityQueue<MatchingNode, float>();
         
         // Initialize with root node
         heap.Enqueue(new MatchingNode(_root, 0, 0, 0), 0);
         
         // Track results and visited states
-        var results = new List<(string word, float score, int ped, Term? term)>();
-        var visited = new HashSet<(TrieNode, int, int)>(); // (node, queryIndex, ped)
+        List<(string word, float score, int ped, Term? term)> results = new List<(string word, float score, int ped, Term? term)>();
+        HashSet<(TrieNode, int, int)> visited = new HashSet<(TrieNode, int, int)>(); // (node, queryIndex, ped)
         
         while (heap.Count > 0 && results.Count < k)
         {
-            var mn = heap.Dequeue();
+            MatchingNode mn = heap.Dequeue();
             
             // Skip if we've exceeded max edit distance
             if (mn.PrefixEditDistance > maxEditDistance)
                 continue;
             
             // Skip duplicate states
-            var state = (mn.Node, mn.QueryIndex, mn.PrefixEditDistance);
+            (TrieNode Node, int QueryIndex, int PrefixEditDistance) state = (mn.Node, mn.QueryIndex, mn.PrefixEditDistance);
             if (!visited.Add(state))
                 continue;
             
@@ -174,7 +174,7 @@ public sealed class DepthFirstFuzzySearch
             if (mn.QueryIndex >= queryLen)
             {
                 // This node and all descendants are valid completions
-                foreach (var completion in CollectCompletions(mn.Node, mn.PrefixEditDistance))
+                foreach ((string word, float score, int ped, Term? term) completion in CollectCompletions(mn.Node, mn.PrefixEditDistance))
                 {
                     results.Add(completion);
                     if (results.Count >= k)
@@ -192,7 +192,7 @@ public sealed class DepthFirstFuzzySearch
                 
                 if (totalPed <= maxEditDistance)
                 {
-                    foreach (var (word, score, term) in mn.Node.Completions)
+                    foreach ((string word, float score, Term? term) in mn.Node.Completions)
                     {
                         results.Add((word, score, totalPed, term));
                         if (results.Count >= k)
@@ -209,12 +209,12 @@ public sealed class DepthFirstFuzzySearch
             // Expand children - this is where depth-first magic happens
             if (mn.Node.Children != null)
             {
-                foreach (var (childChar, childNode) in mn.Node.Children)
+                foreach ((char childChar, TrieNode childNode) in mn.Node.Children)
                 {
                     // Case 1: Exact match - no edit cost
                     if (childChar == queryChar)
                     {
-                        var next = new MatchingNode(
+                        MatchingNode next = new MatchingNode(
                             childNode, 
                             mn.QueryIndex + 1, 
                             mn.PrefixEditDistance, 
@@ -227,7 +227,7 @@ public sealed class DepthFirstFuzzySearch
                     {
                         if (childChar != queryChar)
                         {
-                            var next = new MatchingNode(
+                            MatchingNode next = new MatchingNode(
                                 childNode,
                                 mn.QueryIndex + 1,
                                 mn.PrefixEditDistance + 1,
@@ -236,7 +236,7 @@ public sealed class DepthFirstFuzzySearch
                         }
                         
                         // Case 3: Insertion in document (skip this trie char)
-                        var insertNext = new MatchingNode(
+                        MatchingNode insertNext = new MatchingNode(
                             childNode,
                             mn.QueryIndex,
                             mn.PrefixEditDistance + 1,
@@ -249,7 +249,7 @@ public sealed class DepthFirstFuzzySearch
             // Case 4: Deletion from document (skip this query char)
             if (mn.PrefixEditDistance + 1 <= maxEditDistance)
             {
-                var deleteNext = new MatchingNode(
+                MatchingNode deleteNext = new MatchingNode(
                     mn.Node,
                     mn.QueryIndex + 1,
                     mn.PrefixEditDistance + 1,
@@ -266,7 +266,7 @@ public sealed class DepthFirstFuzzySearch
             return b.score.CompareTo(a.score); // Higher score is better
         });
         
-        foreach (var result in results.Take(k))
+        foreach ((string word, float score, int ped, Term? term) result in results.Take(k))
         {
             yield return result;
         }
@@ -280,18 +280,18 @@ public sealed class DepthFirstFuzzySearch
         TrieNode node, 
         int basePed)
     {
-        var stack = new Stack<TrieNode>();
+        Stack<TrieNode> stack = new Stack<TrieNode>();
         stack.Push(node);
         
-        var completions = new List<(string word, float score, int ped, Term? term)>();
+        List<(string word, float score, int ped, Term? term)> completions = new List<(string word, float score, int ped, Term? term)>();
         
         while (stack.Count > 0)
         {
-            var current = stack.Pop();
+            TrieNode current = stack.Pop();
             
             if (current.Completions != null)
             {
-                foreach (var (word, score, term) in current.Completions)
+                foreach ((string word, float score, Term? term) in current.Completions)
                 {
                     completions.Add((word, score, basePed, term));
                 }
@@ -299,7 +299,7 @@ public sealed class DepthFirstFuzzySearch
             
             if (current.Children != null)
             {
-                foreach (var child in current.Children.Values)
+                foreach (TrieNode child in current.Children.Values)
                 {
                     stack.Push(child);
                 }
@@ -352,7 +352,7 @@ public sealed class DepthFirstFuzzySearch
         char qc = query[qi];
         
         // Try exact match first (most likely to succeed)
-        if (node.Children.TryGetValue(qc, out var exactChild))
+        if (node.Children.TryGetValue(qc, out TrieNode? exactChild))
         {
             if (HasFuzzyMatchDfs(exactChild, query, qi + 1, ped, maxPed))
                 return true;
@@ -366,7 +366,7 @@ public sealed class DepthFirstFuzzySearch
                 return true;
             
             // Substitution and insertion
-            foreach (var (childChar, childNode) in node.Children)
+            foreach ((char childChar, TrieNode childNode) in node.Children)
             {
                 if (childChar == qc)
                     continue; // Already tried exact match
@@ -392,7 +392,7 @@ public sealed class DepthFirstFuzzySearch
         if (node.Children == null)
             return false;
         
-        foreach (var child in node.Children.Values)
+        foreach (TrieNode child in node.Children.Values)
         {
             if (HasAnyCompletion(child))
                 return true;

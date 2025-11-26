@@ -27,7 +27,7 @@ public sealed class ScoreDecomposedTrie
 {
     private Node? _root;
     private int _count;
-    private readonly object _writeLock = new();
+    private readonly object _writeLock = new object();
     
     /// <summary>Number of strings in the trie.</summary>
     public int Count => _count;
@@ -102,7 +102,7 @@ public sealed class ScoreDecomposedTrie
             _root = null;
             _count = 0;
             
-            foreach (var (term, score, termObj) in sortedItems)
+            foreach ((string term, float score, Term? termObj) in sortedItems)
             {
                 if (string.IsNullOrEmpty(term))
                     continue;
@@ -136,7 +136,7 @@ public sealed class ScoreDecomposedTrie
             yield break;
         
         // Find locus node
-        var locus = FindLocus(prefix, out int prefixLength);
+        Node? locus = FindLocus(prefix, out int prefixLength);
         if (locus == null)
             yield break;
         
@@ -151,7 +151,7 @@ public sealed class ScoreDecomposedTrie
         
         // Use bounded priority queue for top-k enumeration
         // Queue contains (score, branchPoints, index, minLcp)
-        var queue = new PriorityQueue<(List<BranchPoint> bp, int index, int minLcp), float>(
+        PriorityQueue<(List<BranchPoint> bp, int index, int minLcp), float> queue = new PriorityQueue<(List<BranchPoint> bp, int index, int minLcp), float>(
             Comparer<float>.Create((a, b) => b.CompareTo(a))); // Max-heap
         
         // Initialize with locus's branch points that have LCP >= prefix length
@@ -159,7 +159,7 @@ public sealed class ScoreDecomposedTrie
         {
             for (int i = 0; i < locus.BranchPoints.Count; i++)
             {
-                var bp = locus.BranchPoints[i];
+                BranchPoint bp = locus.BranchPoints[i];
                 if (bp.LcpLength >= prefix.Length)
                 {
                     // Add first valid branch point
@@ -193,8 +193,8 @@ public sealed class ScoreDecomposedTrie
         // Extract nodes in score order
         while (k > 0 && queue.Count > 0)
         {
-            var (bp, idx, minLcp) = queue.Dequeue();
-            var node = bp[idx].Node;
+            (List<BranchPoint> bp, int idx, int minLcp) = queue.Dequeue();
+            Node node = bp[idx].Node;
             
             yield return (node.Key, node.Score, node.Term);
             k--;
@@ -288,7 +288,7 @@ public sealed class ScoreDecomposedTrie
             
             // Find branch point with matching LCP
             Node? nextNode = null;
-            foreach (var bp in current.BranchPoints)
+            foreach (BranchPoint bp in current.BranchPoints)
             {
                 if (bp.LcpLength == lcp)
                 {
@@ -339,11 +339,11 @@ public sealed class ScoreDecomposedTrie
             }
             
             // Find or create branch point
-            current.BranchPoints ??= new List<BranchPoint>();
+            current.BranchPoints ??= [];
             
             // Since data is sorted, new node is always appended
             Node? existing = null;
-            foreach (var bp in current.BranchPoints)
+            foreach (BranchPoint bp in current.BranchPoints)
             {
                 if (bp.LcpLength == lcp && bp.Node.Key.Length > lcp && term.Length > lcp &&
                     char.ToLowerInvariant(bp.Node.Key[lcp]) == char.ToLowerInvariant(term[lcp]))
@@ -360,7 +360,7 @@ public sealed class ScoreDecomposedTrie
             }
             
             // Create new node and append (maintains sorted order for pre-sorted input)
-            var newNode = new Node(term, score, termObj);
+            Node newNode = new Node(term, score, termObj);
             current.BranchPoints.Add(new BranchPoint(lcp, newNode));
             _count++;
             return;
@@ -413,13 +413,13 @@ public sealed class ScoreDecomposedTrie
             }
             
             // Case 3: Continue traversal or create new branch
-            current.BranchPoints ??= new List<BranchPoint>();
+            current.BranchPoints ??= [];
             
             // Find existing branch with same LCP and matching next character
             int branchIndex = -1;
             for (int i = 0; i < current.BranchPoints.Count; i++)
             {
-                var bp = current.BranchPoints[i];
+                BranchPoint bp = current.BranchPoints[i];
                 if (bp.LcpLength == lcp)
                 {
                     if (bp.Node.Key.Length > lcp && term.Length > lcp &&
@@ -441,7 +441,7 @@ public sealed class ScoreDecomposedTrie
             }
             
             // Create new branch point, maintaining score order
-            var newNode = new Node(term, score, termObj);
+            Node newNode = new Node(term, score, termObj);
             InsertBranchPointSorted(current.BranchPoints, new BranchPoint(lcp, newNode));
             _count++;
             return;
@@ -455,18 +455,18 @@ public sealed class ScoreDecomposedTrie
     private void PromoteNode(string term, float score, Term? termObj, 
         Node current, List<BranchPoint>? parentBps, int parentIndex, int lcp)
     {
-        var newNode = new Node(term, score, termObj);
+        Node newNode = new Node(term, score, termObj);
         
         // The current node becomes a child of the new node
-        newNode.BranchPoints = new List<BranchPoint> { new BranchPoint(lcp, current) };
+        newNode.BranchPoints = [new BranchPoint(lcp, current)];
         
         // Move branch points with LCP < lcp to new node
         if (current.BranchPoints != null)
         {
-            var toMove = new List<BranchPoint>();
-            var toKeep = new List<BranchPoint>();
+            List<BranchPoint> toMove = new List<BranchPoint>();
+            List<BranchPoint> toKeep = new List<BranchPoint>();
             
-            foreach (var bp in current.BranchPoints)
+            foreach (BranchPoint bp in current.BranchPoints)
             {
                 if (bp.LcpLength < lcp)
                 {
@@ -480,7 +480,7 @@ public sealed class ScoreDecomposedTrie
             
             if (toMove.Count > 0)
             {
-                foreach (var bp in toMove)
+                foreach (BranchPoint bp in toMove)
                 {
                     InsertBranchPointSorted(newNode.BranchPoints, bp);
                 }
@@ -491,7 +491,7 @@ public sealed class ScoreDecomposedTrie
         // Replace current in parent
         if (parentBps != null && parentIndex >= 0)
         {
-            var oldBp = parentBps[parentIndex];
+            BranchPoint oldBp = parentBps[parentIndex];
             parentBps[parentIndex] = new BranchPoint(oldBp.LcpLength, newNode);
             BubbleUp(parentBps, parentIndex);
         }
@@ -532,7 +532,7 @@ public sealed class ScoreDecomposedTrie
         if (index <= 0 || bps.Count <= 1)
             return;
         
-        var current = bps[index];
+        BranchPoint current = bps[index];
         float score = current.Node.Score;
         
         // Bubble up while score is higher than predecessor
@@ -547,4 +547,5 @@ public sealed class ScoreDecomposedTrie
     
     #endregion
 }
+
 

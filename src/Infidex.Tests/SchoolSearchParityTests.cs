@@ -253,6 +253,102 @@ public class SchoolSearchParityTests
         }
     }
 
+    /// <summary>
+    /// "scioškola br/pl/če/zl" should rank the corresponding ScioŠkola city first.
+    /// The second token (city abbreviation) should match as an exact prefix of the city name.
+    /// </summary>
+    [TestMethod]
+    [DataRow("scioškola br", "ScioŠkola Brno", DisplayName = "scioškola br → Brno")]
+    [DataRow("scioškola pl", "ScioŠkola Plzeň", DisplayName = "scioškola pl → Plzeň")]
+    [DataRow("scioškola če", "ScioŠkola České Budějovice", DisplayName = "scioškola če → České Budějovice")]
+    [DataRow("scioškola zl", "ScioŠkola Zlín", DisplayName = "scioškola zl → Zlín")]
+    public void ScioskolaCityAbbreviation_RanksCorrectCityFirst(string query, string expectedSchoolSubstring)
+    {
+        var engine = GetEngine();
+        var result = engine.Search(new Query(query, 20));
+        var records = result.Records;
+
+        Console.WriteLine($"Search results for '{query}' (Top 5):");
+        for (int i = 0; i < Math.Min(5, records.Length); i++)
+        {
+            var doc = engine.GetDocument(records[i].DocumentId);
+            Console.WriteLine($"  {i + 1}. [{records[i].Score}] {doc!.IndexedText}");
+        }
+
+        Assert.IsTrue(records.Length >= 1, $"Should return at least 1 school for '{query}'.");
+
+        // Requirement 1: First result must contain the expected ScioŠkola city
+        var firstDoc = engine.GetDocument(records[0].DocumentId);
+        Assert.IsTrue(firstDoc!.IndexedText.Contains(expectedSchoolSubstring, StringComparison.OrdinalIgnoreCase),
+            $"First result should contain '{expectedSchoolSubstring}', but was: {firstDoc.IndexedText}");
+
+        // Requirement 2: The correct ScioŠkola must have a strictly higher score than others
+        int targetScore = records[0].Score;
+        for (int i = 1; i < records.Length; i++)
+        {
+            var doc = engine.GetDocument(records[i].DocumentId);
+            if (!doc!.IndexedText.Contains(expectedSchoolSubstring, StringComparison.OrdinalIgnoreCase))
+            {
+                Assert.IsTrue(targetScore > records[i].Score,
+                    $"'{expectedSchoolSubstring}' (score={targetScore}) should have higher score than '{doc.IndexedText}' (score={records[i].Score})");
+            }
+        }
+    }
+
+    /// <summary>
+    /// "škola zlín s" - when multiple documents tie on precedence, prefer documents where
+    /// a short trailing term like "s" can match MORE document tokens.
+    /// ScioŠkola Zlín should rank higher than "2ika základní škola Zlín" because "s" can
+    /// match both "ScioŠkola" and "s.r.o." vs just "s.r.o." in the other.
+    /// </summary>
+    [TestMethod]
+    public void SkolaZlinS_PrefersScioSkolaForRicherMatch()
+    {
+        var engine = GetEngine();
+        var query = "škola zlín s";
+        var result = engine.Search(new Query(query, 20));
+        var records = result.Records;
+
+        Console.WriteLine($"Search results for '{query}' (Top 10):");
+        for (int i = 0; i < Math.Min(10, records.Length); i++)
+        {
+            var doc = engine.GetDocument(records[i].DocumentId);
+            Console.WriteLine($"  {i + 1}. [{records[i].Score}] {doc!.IndexedText}");
+        }
+
+        Assert.IsTrue(records.Length >= 2, $"Should return at least 2 schools for '{query}'.");
+
+        // Find ScioŠkola Zlín and 2ika positions
+        int scioIndex = -1, scioScore = -1;
+        int ikaIndex = -1, ikaScore = -1;
+
+        for (int i = 0; i < records.Length; i++)
+        {
+            var doc = engine.GetDocument(records[i].DocumentId);
+            string title = doc!.IndexedText;
+
+            if (title.Contains("ScioŠkola Zlín", StringComparison.OrdinalIgnoreCase) && scioIndex < 0)
+            {
+                scioIndex = i;
+                scioScore = records[i].Score;
+            }
+            else if (title.Contains("2ika", StringComparison.OrdinalIgnoreCase) && ikaIndex < 0)
+            {
+                ikaIndex = i;
+                ikaScore = records[i].Score;
+            }
+        }
+
+        Assert.IsTrue(scioIndex >= 0, "Should find ScioŠkola Zlín in results");
+        Assert.IsTrue(ikaIndex >= 0, "Should find 2ika in results");
+
+        // Requirement: ScioŠkola Zlín should have a higher score than 2ika
+        // because "s" can match MORE tokens in ScioŠkola (both "ScioŠkola" and "s.r.o.")
+        Assert.IsTrue(scioScore > ikaScore,
+            $"ScioŠkola Zlín (score={scioScore}, index={scioIndex}) should score higher than " +
+            $"2ika (score={ikaScore}, index={ikaIndex}) for '{query}' because 's' matches more tokens in ScioŠkola.");
+    }
+
     [TestMethod]
     public void TyrsovkaCeskaLipa_PrefersCeskaLipaSchool()
     {
@@ -302,6 +398,121 @@ public class SchoolSearchParityTests
             Assert.IsTrue(targetScore > records[i].Score,
                 $"'{targetName}' (score={targetScore}) should score higher than '{engine.GetDocument(records[i].DocumentId)!.IndexedText}' (score={records[i].Score}) for '{query}'.");
         }
+    }
+
+    /// <summary>
+    /// Debug test to understand why n-gram backbone isn't finding "ScioŠkola Zlín"
+    /// for query "zlínská scioškola".
+    /// </summary>
+    [TestMethod]
+    public void Debug_NGramOverlap_ZlinskaScioSkola()
+    {
+        var engine = GetEngine();
+        engine.EnableDebugLogging = true;
+        
+        Console.WriteLine("=== 'zlínská scioškola' search ===");
+        var fullResults = engine.Search(new Query("zlínská scioškola", 10));
+        Console.WriteLine($"\nTotal candidates: {fullResults.TotalCandidates}");
+        Console.WriteLine("Final results:");
+        foreach (var r in fullResults.Records)
+        {
+            var doc = engine.GetDocument(r.DocumentId);
+            Console.WriteLine($"  [{r.Score}] {doc!.IndexedText}");
+        }
+        
+        engine.EnableDebugLogging = false;
+    }
+
+    /// <summary>
+    /// Tests adjectival/derived word forms matching base words.
+    /// "zlínská" is the adjective form of "Zlín" in Czech.
+    /// The query "zlínská scioškola" should find "ScioŠkola Zlín" because:
+    /// - "zlín" is a PREFIX of "zlínská" (stem matching)
+    /// - "scioškola" matches "ScioŠkola" (case-insensitive)
+    /// </summary>
+    [TestMethod]
+    public void ZlinskaScioSkola_AdjectiveFormMatchesBaseWord()
+    {
+        var engine = GetEngine();
+
+        // Test both word orders
+        var testCases = new[]
+        {
+            ("zlínská scioškola", "Adjective form first"),
+            ("scioškola zlínská", "Adjective form last"),
+        };
+
+        foreach (var (query, description) in testCases)
+        {
+            var result = engine.Search(new Query(query, 20));
+            var records = result.Records;
+
+            Console.WriteLine($"\n{description}: '{query}'");
+            Console.WriteLine($"Results (Top 10):");
+            for (int i = 0; i < Math.Min(10, records.Length); i++)
+            {
+                var doc = engine.GetDocument(records[i].DocumentId);
+                Console.WriteLine($"  [{records[i].Score}] {doc!.IndexedText}");
+            }
+
+            Assert.IsTrue(records.Length > 0, $"Should return results for '{query}'.");
+
+            // Find ScioŠkola Zlín
+            int scioZlinIndex = -1;
+            for (int i = 0; i < records.Length; i++)
+            {
+                var doc = engine.GetDocument(records[i].DocumentId);
+                if (doc!.IndexedText.Contains("ScioŠkola Zlín", StringComparison.OrdinalIgnoreCase))
+                {
+                    scioZlinIndex = i;
+                    break;
+                }
+            }
+
+            Assert.IsTrue(scioZlinIndex >= 0, 
+                $"ScioŠkola Zlín should appear in results for '{query}' ({description})");
+            
+            // ScioŠkola Zlín should be in top 3 at minimum
+            Assert.IsTrue(scioZlinIndex < 3,
+                $"ScioŠkola Zlín should be in top 3 for '{query}' ({description}), but was at index {scioZlinIndex}");
+        }
+    }
+
+    /// <summary>
+    /// Tests that queries with typos near valid words still find reasonable results.
+    /// "zlímská" (typo with 'm' instead of 'n') should ideally still find Zlín-related results
+    /// through fuzzy matching.
+    /// </summary>
+    [TestMethod]
+    public void ZlimskaScioSkola_TypoStillFindsResults()
+    {
+        var engine = GetEngine();
+
+        var query = "zlímská scioškola";
+        var result = engine.Search(new Query(query, 20));
+        var records = result.Records;
+
+        Console.WriteLine($"Search results for '{query}' (typo case):");
+        for (int i = 0; i < Math.Min(10, records.Length); i++)
+        {
+            var doc = engine.GetDocument(records[i].DocumentId);
+            Console.WriteLine($"  [{records[i].Score}] {doc!.IndexedText}");
+        }
+
+        // At minimum, "scioškola" should find ScioŠkola schools
+        bool foundAnyScioSkola = false;
+        for (int i = 0; i < Math.Min(10, records.Length); i++)
+        {
+            var doc = engine.GetDocument(records[i].DocumentId);
+            if (doc!.IndexedText.Contains("ScioŠkola", StringComparison.OrdinalIgnoreCase))
+            {
+                foundAnyScioSkola = true;
+                break;
+            }
+        }
+
+        Assert.IsTrue(foundAnyScioSkola,
+            $"At least one ScioŠkola should appear in top 10 for '{query}' (the 'scioškola' term should still match)");
     }
 }
 
