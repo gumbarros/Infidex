@@ -659,6 +659,123 @@ public abstract class MovieSearchParityTestsBase
     }
 
     [TestMethod]
+    public void Search_TwoF_PrefersStrictPrefixMatch()
+    {
+        var engine = GetEngine();
+        
+        // Query: "two f"
+        // Expected: "Two for ..." titles should rank higher than partial matches like "Flat Two"
+        // because "two" is an exact token match and "f" is a clean prefix of "for/feet/face"
+        var result = engine.Search(new Query("two f", 10));
+        
+        Console.WriteLine($"Search 'two f' returned {result.Records.Length} results");
+        for (int i = 0; i < Math.Min(10, result.Records.Length); i++)
+        {
+            var doc = engine.GetDocument(result.Records[i].DocumentId);
+            Console.WriteLine($"  [{i + 1}] [{result.Records[i].Score}] {doc?.IndexedText}");
+        }
+        
+        Assert.IsTrue(result.Records.Length >= 2, "Should return at least 2 results for 'two f'");
+        
+        // First result MUST be a "Two [word starting with 'f']" title, NOT "Flat Two" or similar
+        var doc1 = engine.GetDocument(result.Records[0].DocumentId);
+        Assert.IsNotNull(doc1);
+        
+        // Valid strict prefix matches: "Two for ...", "Two Faces", "Happy Feet Two", etc.
+        // The key is that "Two" appears first and is followed by a token starting with "f"
+        bool isValidPrefixMatch = doc1!.IndexedText.StartsWith("Two ", StringComparison.OrdinalIgnoreCase) &&
+                                   System.Text.RegularExpressions.Regex.IsMatch(
+                                       doc1.IndexedText,
+                                       @"\bTwo\s+[Ff]",
+                                       System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        
+        Assert.IsTrue(isValidPrefixMatch,
+            $"Position #1 MUST be a strict prefix match like 'Two for/face/feet...', but was '{doc1.IndexedText}'");
+    }
+
+    [TestMethod]
+    public void Search_TwoFo_AllExactPrefixesBeforePartialMatches()
+    {
+        var engine = GetEngine();
+        
+        // Query: "two fo"
+        // GUARANTEE: ALL documents starting with "Two Fo..." MUST rank above documents where "Two" is not at the start
+        var result = engine.Search(new Query("two fo", 20));
+        
+        Console.WriteLine($"Search 'two fo' returned {result.Records.Length} results");
+        for (int i = 0; i < Math.Min(15, result.Records.Length); i++)
+        {
+            var doc = engine.GetDocument(result.Records[i].DocumentId);
+            Console.WriteLine($"  [{i + 1}] [{result.Records[i].Score}] {doc?.IndexedText}");
+        }
+        
+        Assert.IsTrue(result.Records.Length >= 5, "Should return at least 5 results for 'two fo'");
+        
+        // Find where exact prefix matches end
+        int firstNonPrefixIndex = -1;
+        for (int i = 0; i < result.Records.Length; i++)
+        {
+            var doc = engine.GetDocument(result.Records[i].DocumentId);
+            bool isExactPrefix = doc!.IndexedText.StartsWith("Two Fo", StringComparison.OrdinalIgnoreCase);
+            
+            if (!isExactPrefix)
+            {
+                firstNonPrefixIndex = i;
+                break;
+            }
+        }
+        
+        // Now verify ALL documents before firstNonPrefixIndex start with "Two Fo"
+        // and NO documents after that point have higher scores
+        if (firstNonPrefixIndex > 0)
+        {
+            var lastPrefixDoc = engine.GetDocument(result.Records[firstNonPrefixIndex - 1].DocumentId);
+            var firstNonPrefixDoc = engine.GetDocument(result.Records[firstNonPrefixIndex].DocumentId);
+            
+            Assert.IsTrue(lastPrefixDoc!.IndexedText.StartsWith("Two Fo", StringComparison.OrdinalIgnoreCase),
+                $"Document at index {firstNonPrefixIndex - 1} should be an exact prefix match");
+            
+            Assert.IsFalse(firstNonPrefixDoc!.IndexedText.StartsWith("Two Fo", StringComparison.OrdinalIgnoreCase),
+                $"Document at index {firstNonPrefixIndex} should NOT be an exact prefix match");
+            
+            // The key assertion: prefix match MUST score higher than non-prefix
+            Assert.IsTrue(result.Records[firstNonPrefixIndex - 1].Score > result.Records[firstNonPrefixIndex].Score,
+                $"Exact prefix '{lastPrefixDoc.IndexedText}' (score {result.Records[firstNonPrefixIndex - 1].Score}) " +
+                $"MUST score higher than non-prefix '{firstNonPrefixDoc.IndexedText}' (score {result.Records[firstNonPrefixIndex].Score})");
+        }
+        
+        // Additional check: "Tea for Two" should appear AFTER all "Two for..." variants
+        var teaForTwoIndex = -1;
+        for (int i = 0; i < result.Records.Length; i++)
+        {
+            var doc = engine.GetDocument(result.Records[i].DocumentId);
+            if (doc!.IndexedText.Equals("Tea for Two", StringComparison.OrdinalIgnoreCase))
+            {
+                teaForTwoIndex = i;
+                break;
+            }
+        }
+        
+        if (teaForTwoIndex >= 0)
+        {
+            // Count how many "Two for..." documents appear BEFORE "Tea for Two"
+            int twoForCount = 0;
+            for (int i = 0; i < teaForTwoIndex; i++)
+            {
+                var doc = engine.GetDocument(result.Records[i].DocumentId);
+                if (doc!.IndexedText.StartsWith("Two Fo", StringComparison.OrdinalIgnoreCase))
+                {
+                    twoForCount++;
+                }
+            }
+            
+            Assert.IsTrue(twoForCount > 0,
+                "'Tea for Two' should appear AFTER at least one 'Two for...' variant, " +
+                $"but it appeared at index {teaForTwoIndex} with no 'Two for...' variants before it");
+        }
+    }
+
+    [TestMethod]
     public void FellowshipOfTheRing_PrefersCorrectLotrMovie()
     {
         var engine = GetEngine();

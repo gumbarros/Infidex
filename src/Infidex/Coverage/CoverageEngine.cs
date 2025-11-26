@@ -33,7 +33,7 @@ public class CoverageEngine
     public byte CalculateCoverageScore(string query, string documentText, double lcsSum, out int wordHits)
     {
         CoverageResult result = CalculateCoverageInternal(query, documentText, lcsSum, out wordHits, 
-            out _, out _, out _, out _, out _, out _, out _, out _, out _, out _);
+            out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _);
         return result.CoverageScore;
     }
     
@@ -49,7 +49,8 @@ public class CoverageEngine
             out _,  // suffixPrefixRun
             out _,  // phraseSpan
             out _,  // precedingStrictCount
-            out _); // lastTokenHasPrefix
+            out _,  // lastTokenHasPrefix
+            out _); // fusionSignals
         
         return CoverageScorer.CalculateRankedScore(
             result,
@@ -78,7 +79,8 @@ public class CoverageEngine
             out int suffixPrefixRun,
             out int phraseSpan,
             out int precedingStrictCount,
-            out bool lastTokenHasPrefix);
+            out bool lastTokenHasPrefix,
+            out var fusionSignals);
 
         return new CoverageFeatures(
             result.CoverageScore,
@@ -101,7 +103,8 @@ public class CoverageEngine
             result.LastTermIsTypeAhead,
             result.IdfCoverage,
             result.TotalIdf,
-            result.MissingIdf);
+            result.MissingIdf,
+            fusionSignals);
     }
 
     private CoverageResult CalculateCoverageInternal(string query, string documentText, double lcsSum, 
@@ -115,7 +118,8 @@ public class CoverageEngine
         out int suffixPrefixRun,
         out int phraseSpan,
         out int precedingStrictCount,
-        out bool lastTokenHasPrefix)
+        out bool lastTokenHasPrefix,
+        out FusionSignals fusionSignals)
     {
         wordHits = 0;
         docTokenCount = 0;
@@ -128,6 +132,7 @@ public class CoverageEngine
         phraseSpan = 0;
         precedingStrictCount = 0;
         lastTokenHasPrefix = false;
+        fusionSignals = default;
         
         if (query.Length == 0) 
             return new CoverageResult(0, 0, -1, 0);
@@ -147,6 +152,7 @@ public class CoverageEngine
         if (qCountRaw == 0)
         {
             if (queryTokenArray != null) ArrayPool<StringSlice>.Shared.Return(queryTokenArray);
+            fusionSignals = default;
             return new CoverageResult(0, 0, -1, 0);
         }
 
@@ -306,7 +312,7 @@ public class CoverageEngine
 
         wordHits = state.WordHits;
 
-        return CoverageScorer.CalculateFinalScore(
+        CoverageResult coverageResult = CoverageScorer.CalculateFinalScore(
             ref state,
             queryLen,
             lcsSum,
@@ -320,6 +326,42 @@ public class CoverageEngine
             out phraseSpan,
             out precedingStrictCount,
             out lastTokenHasPrefix);
+        
+        // Fusion signals need all tokens (no MinWordSize filtering)
+        int maxFusionQueryTokens = queryLen / 2 + 1;
+        StringSlice[]? fusionQueryTokenArray = null;
+        Span<StringSlice> fusionQueryTokens = maxFusionQueryTokens <= CoverageTokenizer.MaxStackTerms
+            ? stackalloc StringSlice[maxFusionQueryTokens]
+            : (fusionQueryTokenArray = ArrayPool<StringSlice>.Shared.Rent(maxFusionQueryTokens));
+
+        int fusionQCount = CoverageTokenizer.TokenizeToSpan(query, fusionQueryTokens, minWordSize: 0, delimiters);
+
+        int maxFusionDocTokens = docLen / 2 + 1;
+        StringSlice[]? fusionDocTokenArray = null;
+        Span<StringSlice> fusionDocTokens = maxFusionDocTokens <= CoverageTokenizer.MaxStackTerms
+            ? stackalloc StringSlice[maxFusionDocTokens]
+            : fusionDocTokenArray = ArrayPool<StringSlice>.Shared.Rent(maxFusionDocTokens);
+
+        int fusionDCount = CoverageTokenizer.TokenizeToSpan(documentText, fusionDocTokens, minWordSize: 0, delimiters);
+
+        try
+        {
+            fusionSignals = FusionSignalComputer.ComputeSignals(
+                querySpan,
+                docSpan,
+                fusionQueryTokens[..fusionQCount],
+                fusionDocTokens[..fusionDCount],
+                fusionQCount,
+                fusionDCount,
+                _setup.MinWordSize);
+        }
+        finally
+        {
+            if (fusionQueryTokenArray != null) ArrayPool<StringSlice>.Shared.Return(fusionQueryTokenArray);
+            if (fusionDocTokenArray != null) ArrayPool<StringSlice>.Shared.Return(fusionDocTokenArray);
+        }
+
+        return coverageResult;
     }
     
     /// <summary>

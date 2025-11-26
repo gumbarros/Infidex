@@ -306,6 +306,9 @@ internal sealed class SearchPipeline
             char[] delimiters = _vectorModel.Tokenizer.TokenizerSetup?.Delimiters ?? [' '];
             int minStemLength = _vectorModel.Tokenizer.IndexSizes.Min();
 
+            // Tokenize the query once per search and reuse across all candidate documents
+            string[] queryTokens = searchText.Split(delimiters, StringSplitOptions.RemoveEmptyEntries);
+
             HashSet<int> tfidfInternalIds = BuildTfidfInternalIdSet(topCandidates);
             var (wmOverlapping, wmUnique) = PartitionWordMatcherCandidates(wordMatcherInternalIds, tfidfInternalIds);
 
@@ -315,7 +318,7 @@ internal sealed class SearchPipeline
             long wmCoverageStart = perfStopwatch?.ElapsedMilliseconds ?? 0;
             foreach (int internalId in wmToProcess)
             {
-                ProcessCandidate(internalId, searchText, coverageSetup, 0f,
+                ProcessCandidate(internalId, searchText, queryTokens, coverageSetup, 0f,
                     bestSegments, lcsAndWordHitsSpan, documentKeyToIndex,
                     finalScores, ref maxWordHits, delimiters, minStemLength);
             }
@@ -328,7 +331,7 @@ internal sealed class SearchPipeline
                 if (doc == null || doc.Deleted)
                     continue;
 
-                ProcessCandidate(doc.Id, searchText, coverageSetup, (float)candidate.Score / 255f,
+                ProcessCandidate(doc.Id, searchText, queryTokens, coverageSetup, (float)candidate.Score / 255f,
                     bestSegments, lcsAndWordHitsSpan, documentKeyToIndex,
                     finalScores, ref maxWordHits, delimiters, minStemLength);
             }
@@ -390,6 +393,7 @@ internal sealed class SearchPipeline
     private void ProcessCandidate(
         int internalId,
         string searchText,
+        string[] queryTokens,
         CoverageSetup coverageSetup,
         float baseScore,
         Span2D<byte> bestSegments,

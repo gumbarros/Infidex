@@ -23,6 +23,9 @@ public readonly struct CoverageFeatures
     public readonly float IdfCoverage;      // Information-weighted coverage (IDF-based)
     public readonly float TotalIdf;         // Total information content of query
     public readonly float MissingIdf;       // Information content of unmatched terms
+    
+    // Precomputed fusion signals (Lucene-style: no string ops in fusion layer)
+    public readonly FusionSignals FusionSignals;
 
     public CoverageFeatures(
         byte coverageScore,
@@ -45,7 +48,8 @@ public readonly struct CoverageFeatures
         bool lastTermIsTypeAhead = false,
         float idfCoverage = 0f,
         float totalIdf = 0f,
-        float missingIdf = 0f)
+        float missingIdf = 0f,
+        FusionSignals fusionSignals = default)
     {
         CoverageScore = coverageScore;
         TermsCount = termsCount;
@@ -68,5 +72,6 @@ public readonly struct CoverageFeatures
         IdfCoverage = idfCoverage;
         TotalIdf = totalIdf;
         MissingIdf = missingIdf;
+        FusionSignals = fusionSignals;
     }
 }
