@@ -26,6 +26,12 @@ internal sealed class WordMatcher : IDisposable
     
     private bool _disposed;
     
+    /// <summary>
+    /// Upper bound on how many FST affix term IDs we will expand per lookup.
+    /// This keeps affix-based candidate generation bounded for very dense prefixes/suffixes.
+    /// </summary>
+    private const int MaxFstAffixTermsPerQuery = 4096;
+    
     public WordMatcher(WordMatcherSetup setup, char[] delimiters, TextNormalizer? textNormalizer = null)
     {
         _setup = setup;
@@ -217,14 +223,37 @@ internal sealed class WordMatcher : IDisposable
             normalized = _textNormalizer.Normalize(normalized);
         }
         
-        // Get matching term IDs from FST
+        // Get matching term IDs from FST with a bounded budget to avoid
+        // exploding work on extremely common prefixes/suffixes.
         List<int> termIds = [];
-        
-        // Prefix matches
-        _fstIndex.GetByPrefix(normalized.AsSpan(), termIds);
-        
-        // Suffix matches
-        _fstIndex.GetBySuffix(normalized.AsSpan(), termIds);
+        ReadOnlySpan<char> span = normalized.AsSpan();
+
+        int prefixCount = _fstIndex.CountByPrefix(span);
+        int suffixCount = _fstIndex.CountBySuffix(span);
+        int remainingBudget = MaxFstAffixTermsPerQuery;
+
+        if (prefixCount == 0 && suffixCount == 0)
+            return results;
+
+        if (prefixCount > 0 && remainingBudget > 0)
+        {
+            int take = remainingBudget > 0 ? Math.Min(prefixCount, remainingBudget) : 0;
+            if (take > 0)
+            {
+                _fstIndex.GetByPrefix(span, termIds, take);
+                remainingBudget -= take;
+            }
+        }
+
+        if (suffixCount > 0 && remainingBudget > 0)
+        {
+            int take = remainingBudget > 0 ? Math.Min(suffixCount, remainingBudget) : 0;
+            if (take > 0)
+            {
+                _fstIndex.GetBySuffix(span, termIds, take);
+                remainingBudget -= take;
+            }
+        }
         
         // Convert term IDs to document IDs
         foreach (int termId in termIds)

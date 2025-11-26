@@ -35,8 +35,8 @@ internal static class IndexPersistence
         FstIndex? fstIndex = null,
         PositionalPrefixIndex? shortQueryIndex = null)
     {
-        using MemoryStream dataStream = new MemoryStream();
-        using BinaryWriter dataWriter = new BinaryWriter(dataStream);
+        using MemoryStream dataStream = new();
+        using BinaryWriter dataWriter = new(dataStream);
         
         // Determine flags
         IndexFlags flags = IndexFlags.None;
@@ -74,8 +74,11 @@ internal static class IndexPersistence
         }
         
         // Write short query index (if present)
-        shortQueryIndex?.Write(dataWriter);
-
+        if (shortQueryIndex != null)
+        {
+            shortQueryIndex.Write(dataWriter);
+        }
+        
         // Write data to main stream with explicit length prefix so that callers
         // can append additional sections (e.g., WordMatcher) after the index blob.
         byte[] data = dataStream.ToArray();
@@ -156,8 +159,8 @@ internal static class IndexPersistence
         }
         
         // Parse data
-        using MemoryStream dataStream = new MemoryStream(data);
-        using BinaryReader dataReader = new BinaryReader(dataStream);
+        using MemoryStream dataStream = new(data);
+        using BinaryReader dataReader = new(dataStream);
         
         // Read documents
         ReadDocuments(dataReader, documents, (int)docCount);
@@ -187,7 +190,7 @@ internal static class IndexPersistence
         try
         {
             using FileStream stream = File.OpenRead(filePath);
-            using BinaryReader reader = new BinaryReader(stream);
+            using BinaryReader reader = new(stream);
             
             if (stream.Length < 26) // Minimum header size
                 return false;
@@ -213,7 +216,7 @@ internal static class IndexPersistence
         try
         {
             using FileStream stream = File.OpenRead(filePath);
-            using BinaryReader reader = new BinaryReader(stream);
+            using BinaryReader reader = new(stream);
             
             byte[] magic = reader.ReadBytes(6);
             if (!magic.AsSpan().SequenceEqual(MAGIC))
@@ -302,10 +305,10 @@ internal static class IndexPersistence
             int jsonIdx = reader.ReadInt32();
             bool deleted = reader.ReadBoolean();
             
-            DocumentFields fields = new DocumentFields();
+            DocumentFields fields = new();
             fields.AddField("content", text, Weight.Med, indexable: true);
             
-            Document doc = new Document(key, segment, fields, info)
+            Document doc = new(key, segment, fields, info)
             {
                 JsonIndex = jsonIdx,
                 IndexedText = text,

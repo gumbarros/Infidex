@@ -215,6 +215,31 @@ internal sealed class PositionalPrefixIndex
         return docs.Count;
     }
     
+    /// <summary>
+    /// Enumerates all prefixes and their posting lists.
+    /// Intended for building secondary structures like champion lists.
+    /// </summary>
+    internal IEnumerable<(string Prefix, PrefixPostingList List)> GetAllPrefixes()
+    {
+        // Single-character prefixes from array index
+        for (int i = 0; i < _singleCharIndex.Length; i++)
+        {
+            PrefixPostingList? list = _singleCharIndex[i];
+            if (list != null && list.Count > 0)
+            {
+                char c = (char)i;
+                yield return (c.ToString(), list);
+            }
+        }
+
+        // Multi-character prefixes from dictionary
+        foreach ((string prefix, PrefixPostingList list) in _multiCharIndex)
+        {
+            if (list.Count > 0)
+                yield return (prefix, list);
+        }
+    }
+    
     #endregion
     
     #region Serialization

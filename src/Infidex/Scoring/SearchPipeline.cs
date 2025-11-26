@@ -17,6 +17,16 @@ internal sealed class SearchPipeline
     private readonly CoverageEngine? _coverageEngine;
     private readonly CoverageSetup? _coverageSetup;
     private readonly WordMatcher.WordMatcher? _wordMatcher;
+        
+        // Short-query specialization thresholds
+        private const int ShortQueryMaxLength = 3;
+        
+        /// <summary>
+        /// If a short query (length <= ShortQueryMaxLength) matches more than this many
+        /// documents in the positional prefix index, we skip coverage and rely on the
+        /// short-query fast path / BM25 backbone instead.
+        /// </summary>
+        private const int ShortQueryCoverageDocCap = 500;
 
     public bool EnableDebugLogging { get; set; }
 
@@ -62,12 +72,59 @@ internal sealed class SearchPipeline
         {
             ScoreArray relevancyScores = ExecuteRelevancyStage(searchText, bestSegments, coverageDepth, maxResults, ref tfidfMs, perfStopwatch);
 
-            // Always compute consolidated TF-IDF candidates so we can fall back if coverage
+            // Always compute consolidated Stage 1 candidates so we can fall back if coverage
             // decides there are no good lexical matches (e.g. typo-heavy queries like "battamam").
             ScoreArray consolidatedStage1 = SegmentProcessor.ConsolidateSegments(relevancyScores, bestSegments);
             ScoreEntry[] stage1Results = consolidatedStage1.GetAll();
 
-            if (_coverageEngine == null || coverageSetup == null || !QueryAnalyzer.CanUseNGrams(searchText, _vectorModel.Tokenizer))
+            // Decide whether coverage should run.
+            // For general queries we use QueryAnalyzer.CanUseNGrams.
+            // For very short queries (1-3 chars) we additionally consult the positional
+            // prefix index and skip coverage if the prefix matches too many documents.
+            bool isShortQuery = searchText.Length > 0 &&
+                                searchText.Length <= ShortQueryMaxLength &&
+                                (_vectorModel.Tokenizer.TokenizerSetup?.Delimiters ?? [' ']).All(d => !searchText.Contains(d));
+
+            // Two-step strategy for short queries: if the fast path already fills the
+            // requested number of results, skip the expensive coverage stage entirely.
+            if (isShortQuery && stage1Results.Length >= maxResults && maxResults < int.MaxValue)
+            {
+                if (EnableDebugLogging)
+                {
+                    Console.WriteLine($"[DEBUG] Short-query fast path satisfied maxResults={maxResults}; skipping coverage.");
+                }
+
+                if (stage1Results.Length > maxResults)
+                    stage1Results = stage1Results[..maxResults];
+
+                return stage1Results;
+            }
+
+            int shortQueryDocCount = 0;
+            bool shortQueryDocCountKnown = false;
+
+            if (isShortQuery && _vectorModel.ShortQueryIndex != null)
+            {
+                shortQueryDocCount = _vectorModel.ShortQueryIndex.CountDocuments(searchText.AsSpan());
+                shortQueryDocCountKnown = true;
+            }
+
+            bool canUseNGrams = QueryAnalyzer.CanUseNGrams(searchText, _vectorModel.Tokenizer);
+
+            bool allowShortQueryCoverage =
+                isShortQuery &&
+                shortQueryDocCountKnown &&
+                shortQueryDocCount > 0 &&
+                shortQueryDocCount <= ShortQueryCoverageDocCap;
+
+            bool skipCoverageDueToShortQueryDocCap =
+                isShortQuery &&
+                shortQueryDocCountKnown &&
+                shortQueryDocCount > ShortQueryCoverageDocCap;
+
+            if (_coverageEngine == null || coverageSetup == null ||
+                (!canUseNGrams && !allowShortQueryCoverage) ||
+                skipCoverageDueToShortQueryDocCap)
             {
                 return stage1Results;
             }
@@ -98,7 +155,7 @@ internal sealed class SearchPipeline
         }
     }
 
-    private ScoreArray ExecuteRelevancyStage(
+        private ScoreArray ExecuteRelevancyStage(
         string searchText,
         Span2D<byte> bestSegments,
         int coverageDepth,
@@ -111,15 +168,40 @@ internal sealed class SearchPipeline
         char[] delimiters = _vectorModel.Tokenizer.TokenizerSetup?.Delimiters ?? [' '];
 
         var (canUseNGrams, hasMixedTerms, longWordsSearchText) = QueryAnalyzer.Analyze(searchText, _vectorModel.Tokenizer);
-
         ScoreArray relevancyScores;
 
         if (!canUseNGrams)
         {
             if (searchText.Length == 1)
             {
+                // Single-character query: principled two-step strategy.
+                // 1) Try the positional prefix index fast path via ShortQueryResolver.
+                //    If it can already supply at least maxResults candidates, we use it.
+                // 2) Otherwise, fall back to the original full scan so semantics are preserved.
+                char ch = char.ToLowerInvariant(searchText[0]);
+
+                if (_vectorModel.ShortQueryResolver != null &&
+                    _vectorModel.ShortQueryIndex != null &&
+                    maxResults < int.MaxValue)
+                {
+                    Span<char> prefixSpan = stackalloc char[1];
+                    prefixSpan[0] = ch;
+
+                    if (_vectorModel.ShortQueryResolver.TryGetChampions(prefixSpan, maxResults, out ScoreEntry[] prefixResults))
+                    {
+                        relevancyScores = new ScoreArray();
+                        foreach (ScoreEntry entry in prefixResults)
+                        {
+                            relevancyScores.Add(entry.DocumentId, entry.Score, entry.Tiebreaker);
+                        }
+
+                        goto DoneRelevancy;
+                    }
+                }
+
+                // Fallback: original single-character scan (contains-char-anywhere semantics).
                 ScoreEntry[] singleCharResults = ShortQueryProcessor.SearchSingleCharacter(
-                    searchText[0], bestSegments, queryIndex: 0, maxResults: maxResults,
+                    ch, bestSegments, queryIndex: 0, maxResults: maxResults,
                     _vectorModel.Documents.GetAllDocuments(), delimiters);
 
                 relevancyScores = new ScoreArray();
@@ -151,6 +233,8 @@ internal sealed class SearchPipeline
             _vectorModel.EnableDebugLogging = EnableDebugLogging;
             relevancyScores = _vectorModel.SearchWithMaxScore(tfidfQuery, coverageDepth, bestSegments, queryIndex: 0);
         }
+
+    DoneRelevancy:
 
         if (perfStopwatch != null)
             tfidfMs = perfStopwatch.ElapsedMilliseconds - tfidfStart;

@@ -108,6 +108,32 @@ internal sealed class FstIndex
     }
     
     /// <summary>
+    /// Returns up to <paramref name="maxOutputs"/> term outputs that start with the given prefix.
+    /// This is useful for bounding work on very dense prefixes.
+    /// Complexity: O(|prefix| + min(k, maxOutputs)) where k is the number of matching terms.
+    /// </summary>
+    public void GetByPrefix(ReadOnlySpan<char> prefix, List<int> outputs, int maxOutputs)
+    {
+        if (prefix.IsEmpty || _forwardNodes.Length == 0 || maxOutputs <= 0)
+            return;
+        
+        // Navigate to prefix node
+        int nodeIndex = _forwardRootIndex;
+        
+        foreach (char c in prefix)
+        {
+            int arcIndex = FindArc(nodeIndex, c, _forwardNodes, _forwardArcs);
+            if (arcIndex < 0)
+                return; // Prefix not found
+            
+            nodeIndex = _forwardArcs[arcIndex].TargetNodeIndex;
+        }
+        
+        // Collect bounded outputs in subtree
+        CollectOutputsLimited(nodeIndex, _forwardNodes, _forwardArcs, outputs, maxOutputs);
+    }
+    
+    /// <summary>
     /// Checks if any term starts with the given prefix.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -183,6 +209,30 @@ internal sealed class FstIndex
     }
     
     /// <summary>
+    /// Returns up to <paramref name="maxOutputs"/> term outputs that end with the given suffix.
+    /// Uses the reverse FST for efficient lookup.
+    /// Complexity: O(|suffix| + min(k, maxOutputs)) where k is the number of matching terms.
+    /// </summary>
+    public void GetBySuffix(ReadOnlySpan<char> suffix, List<int> outputs, int maxOutputs)
+    {
+        if (suffix.IsEmpty || _reverseNodes.Length == 0 || maxOutputs <= 0)
+            return;
+        
+        int nodeIndex = _reverseRootIndex;
+        
+        for (int i = suffix.Length - 1; i >= 0; i--)
+        {
+            int arcIndex = FindArc(nodeIndex, suffix[i], _reverseNodes, _reverseArcs);
+            if (arcIndex < 0)
+                return;
+            
+            nodeIndex = _reverseArcs[arcIndex].TargetNodeIndex;
+        }
+        
+        CollectOutputsLimited(nodeIndex, _reverseNodes, _reverseArcs, outputs, maxOutputs);
+    }
+    
+    /// <summary>
     /// Checks if any term ends with the given suffix.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -203,6 +253,28 @@ internal sealed class FstIndex
         }
         
         return true;
+    }
+    
+    /// <summary>
+    /// Returns the number of terms that end with the given suffix.
+    /// </summary>
+    public int CountBySuffix(ReadOnlySpan<char> suffix)
+    {
+        if (suffix.IsEmpty || _reverseNodes.Length == 0)
+            return 0;
+        
+        int nodeIndex = _reverseRootIndex;
+        
+        for (int i = suffix.Length - 1; i >= 0; i--)
+        {
+            int arcIndex = FindArc(nodeIndex, suffix[i], _reverseNodes, _reverseArcs);
+            if (arcIndex < 0)
+                return 0;
+            
+            nodeIndex = _reverseArcs[arcIndex].TargetNodeIndex;
+        }
+        
+        return CountOutputs(nodeIndex, _reverseNodes, _reverseArcs);
     }
     
     #endregion
@@ -372,6 +444,37 @@ internal sealed class FstIndex
                 outputs.Add(node.Output);
             
             // Push children in reverse order for correct traversal order
+            for (int i = node.ArcCount - 1; i >= 0; i--)
+            {
+                ref FstArc arc = ref arcs[node.ArcStartIndex + i];
+                stack.Push(arc.TargetNodeIndex);
+            }
+        }
+    }
+    
+    /// <summary>
+    /// Collects up to <paramref name="maxOutputs"/> outputs from a subtree using iterative DFS.
+    /// </summary>
+    private static void CollectOutputsLimited(int startNode, FstNode[] nodes, FstArc[] arcs, List<int> outputs, int maxOutputs)
+    {
+        if (startNode < 0 || startNode >= nodes.Length || maxOutputs <= 0)
+            return;
+        
+        Stack<int> stack = new Stack<int>();
+        stack.Push(startNode);
+        
+        while (stack.Count > 0 && outputs.Count < maxOutputs)
+        {
+            int nodeIndex = stack.Pop();
+            ref FstNode node = ref nodes[nodeIndex];
+            
+            if (node.IsFinal && node.Output >= 0)
+            {
+                outputs.Add(node.Output);
+                if (outputs.Count >= maxOutputs)
+                    break;
+            }
+            
             for (int i = node.ArcCount - 1; i >= 0; i--)
             {
                 ref FstArc arc = ref arcs[node.ArcStartIndex + i];

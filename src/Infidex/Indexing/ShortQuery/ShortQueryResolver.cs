@@ -13,6 +13,12 @@ internal sealed class ShortQueryResolver
     private readonly DocumentCollection _documents;
     private readonly char[] _delimiters;
     
+    // Precomputed champion lists for each prefix (1-3 chars).
+    // Key: prefix string, Value: top-N ScoreEntries sorted by score desc.
+    private readonly Dictionary<string, ScoreEntry[]> _championLists;
+    
+    private const int ChampionListSize = 64;
+    
     public ShortQueryResolver(
         PositionalPrefixIndex prefixIndex, 
         DocumentCollection documents,
@@ -21,6 +27,7 @@ internal sealed class ShortQueryResolver
         _prefixIndex = prefixIndex;
         _documents = documents;
         _delimiters = delimiters ?? [' '];
+        _championLists = BuildChampionLists();
     }
     
     /// <summary>
@@ -33,6 +40,14 @@ internal sealed class ShortQueryResolver
     {
         if (query.IsEmpty || query.Length > _prefixIndex.MaxPrefixLength)
             return [];
+
+        // Fast path: if we have a champion list for this prefix and it already
+        // provides at least maxResults entries, we can satisfy the query directly
+        // from the precomputed list in O(1).
+        if (TryGetChampions(query, maxResults, out ScoreEntry[] championResults))
+        {
+            return championResults;
+        }
         
         PrefixPostingList? postingList = _prefixIndex.GetPostingList(query);
         if (postingList == null || postingList.Count == 0)
@@ -95,6 +110,82 @@ internal sealed class ShortQueryResolver
     }
     
     /// <summary>
+    /// Builds champion lists (top-N documents) for each prefix using the same
+    /// scoring logic as Resolve. This runs once at index finalization time.
+    /// </summary>
+    private Dictionary<string, ScoreEntry[]> BuildChampionLists()
+    {
+        Dictionary<string, ScoreEntry[]> result = new Dictionary<string, ScoreEntry[]>(StringComparer.Ordinal);
+        
+        foreach ((string prefix, PrefixPostingList postingList) in _prefixIndex.GetAllPrefixes())
+        {
+            if (string.IsNullOrEmpty(prefix))
+                continue;
+            
+            ReadOnlySpan<char> querySpan = prefix.AsSpan();
+            
+            // Group postings by document and calculate scores (same logic as Resolve)
+            Dictionary<int, DocumentScore> docScores = new Dictionary<int, DocumentScore>();
+            
+            foreach (ref readonly PrefixPosting posting in postingList.Postings)
+            {
+                int docId = posting.DocumentId;
+                
+                if (!docScores.TryGetValue(docId, out DocumentScore score))
+                {
+                    Document? doc = _documents.GetDocument(docId);
+                    if (doc == null || doc.Deleted)
+                        continue;
+                    
+                    score = new DocumentScore { DocumentKey = doc.DocumentKey };
+                    docScores[docId] = score;
+                }
+                
+                score.Occurrences++;
+                if (posting.IsWordStart)
+                {
+                    score.WordStartCount++;
+                    if (posting.Position == 0)
+                        score.HasFirstPosition = true;
+                    if (!score.HasWordStart || posting.Position < score.FirstWordStartPosition)
+                    {
+                        score.HasWordStart = true;
+                        score.FirstWordStartPosition = posting.Position;
+                    }
+                }
+            }
+            
+            if (docScores.Count == 0)
+                continue;
+            
+            List<ScoreEntry> scores = new List<ScoreEntry>(docScores.Count);
+            
+            foreach ((int docId, DocumentScore score) in docScores)
+            {
+                Document? doc = _documents.GetDocument(docId);
+                if (doc == null || doc.Deleted)
+                    continue;
+                
+                ushort finalScore = CalculateFinalScore(querySpan, doc, score);
+                scores.Add(new ScoreEntry(finalScore, score.DocumentKey));
+            }
+            
+            if (scores.Count == 0)
+                continue;
+            
+            // Sort by score descending and take top-N
+            scores.Sort((a, b) => b.Score.CompareTo(a.Score));
+            
+            if (scores.Count > ChampionListSize)
+                scores.RemoveRange(ChampionListSize, scores.Count - ChampionListSize);
+            
+            result[prefix] = scores.ToArray();
+        }
+        
+        return result;
+    }
+    
+    /// <summary>
     /// Resolves a single character query with optimized scoring.
     /// </summary>
     public ScoreEntry[] ResolveSingleChar(char ch, int maxResults = int.MaxValue)
@@ -102,6 +193,39 @@ internal sealed class ShortQueryResolver
         Span<char> query = stackalloc char[1];
         query[0] = char.ToLowerInvariant(ch);
         return Resolve(query, maxResults);
+    }
+    
+    /// <summary>
+    /// Attempts to satisfy a prefix query directly from the champion lists.
+    /// Returns true if at least <paramref name="maxResults"/> entries are available.
+    /// </summary>
+    public bool TryGetChampions(ReadOnlySpan<char> prefix, int maxResults, out ScoreEntry[] results)
+    {
+        results = [];
+        
+        if (maxResults <= 0)
+            return false;
+        
+        if (prefix.IsEmpty || prefix.Length > _prefixIndex.MaxPrefixLength)
+            return false;
+        
+        string key = prefix.ToString();
+        if (!_championLists.TryGetValue(key, out ScoreEntry[]? champions) || champions.Length == 0)
+            return false;
+        
+        if (champions.Length < maxResults)
+            return false;
+        
+        if (champions.Length == maxResults)
+        {
+            results = champions;
+        }
+        else
+        {
+            results = champions[..maxResults];
+        }
+        
+        return true;
     }
     
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

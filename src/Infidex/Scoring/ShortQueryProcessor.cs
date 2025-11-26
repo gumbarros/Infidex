@@ -14,6 +14,12 @@ namespace Infidex.Scoring;
 internal static class ShortQueryProcessor
 {
     /// <summary>
+    /// Upper bound on how many FST term IDs we will materialize per prefix pattern.
+    /// This keeps short-query prefix expansion work data-agnostic and predictable.
+    /// </summary>
+    private const int MaxFstTermsPerPrefix = 4096;
+
+    /// <summary>
     /// Searches for single-character queries using direct lexical scan.
     /// </summary>
     public static ScoreEntry[] SearchSingleCharacter(
@@ -186,9 +192,19 @@ internal static class ShortQueryProcessor
             
             if (fstIndex != null)
             {
-                // O(prefix length) FST lookup - returns term indices
+                // O(prefix length) FST lookup - returns term indices.
+                // We bound the number of FST outputs we materialize per pattern to avoid
+                // prefix explosion on very common patterns like "s", "st", etc.
+                int termCount = fstIndex.CountByPrefix(pattern.AsSpan());
+                if (termCount == 0)
+                    continue;
+
+                int limit = MaxFstTermsPerPrefix > 0
+                    ? Math.Min(termCount, MaxFstTermsPerPrefix)
+                    : termCount;
+
                 List<int> termIndices = [];
-                fstIndex.GetByPrefix(pattern.AsSpan(), termIndices);
+                fstIndex.GetByPrefix(pattern.AsSpan(), termIndices, limit);
                 matchingTerms = termIndices
                     .Select(termCollection.GetTermByIndex)
                     .Where(t => t != null)!;
