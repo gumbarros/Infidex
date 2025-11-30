@@ -45,11 +45,12 @@ internal static class FusionScorer
         // We use the same bit-logic as before to define tiers, but result is a float
         int precedence = 0;
         
-        // PRECEDENCE BIT STRUCTURE
-        // Bits 9-8:     COVERAGE TIER (multi-term only)
-        // Bit 7 (128):  EXACT PREFIX or SUBSET MATCH
-        // Bit 6 (64):   HIGH-INFO TERM DOMINANCE
-        // Bits 5-0:     Quality signals
+        // PRECEDENCE BIT STRUCTURE (Shifted to allow 12 bits for quality signals)
+        // Bits 17-16:   COVERAGE TIER (multi-term only)
+        // Bit 15:       EXACT PREFIX
+        // Bit 14:       SUBSET MATCH
+        // Bit 13:       HIGH-INFO TERM DOMINANCE
+        // Bits 12-0:    Quality signals
         
         int coverageTier = 0;
         if (!isSingleTerm && features.TermsCount > 0)
@@ -68,15 +69,20 @@ internal static class FusionScorer
         
         if (!isSingleTerm && coverageTier > 0)
         {
-            precedence |= (coverageTier & 0b11) << 8;
+            precedence |= (coverageTier & 0b11) << 16;
         }
         
         bool isExactPrefix = !isSingleTerm && isClean && startsAtBeginning && lexicalPrefixLast && isComplete;
         bool isSubsetMatch = !isSingleTerm && features.DocTokenCount > 0 && features.WordHits == features.DocTokenCount;
         
-        if (isExactPrefix || isSubsetMatch)
+        if (isExactPrefix)
         {
-            precedence |= 128;
+            precedence |= (1 << 15);
+        }
+        
+        if (isSubsetMatch)
+        {
+            precedence |= (1 << 14);
         }
         
         // High-info term dominance logic
@@ -129,7 +135,7 @@ internal static class FusionScorer
             
             if (hasDominantTerm || hasStrongAnchor)
             {
-                precedence |= 64;
+                precedence |= (1 << 13);
             }
 
             int unmatchedTerms = features.TermsCount - features.TermsWithAnyMatch;
@@ -141,8 +147,8 @@ internal static class FusionScorer
 
         if (isSingleTerm)
         {
-            if (isComplete) precedence |= (1 << 9);
-            if (isClean && features.TermsCount > 0) precedence |= (1 << 8);
+            if (isComplete) precedence |= (1 << 17);
+            if (isClean && features.TermsCount > 0) precedence |= (1 << 16);
             precedence |= ComputeSingleTermPrecedence(isExact, isClean, startsAtBeginning, isComplete);
         }
         else
@@ -250,6 +256,7 @@ internal static class FusionScorer
             Console.WriteLine($"  query=\"{queryText}\"");
             Console.WriteLine($"  doc=\"{docPreview}\"");
             Console.WriteLine($"  precedence={precedence}, semantic={semantic:F4}, finalScore={finalScore:F4}");
+            Console.WriteLine($"  bits: {(precedence & (1 << 17)) != 0} (Tier), {(precedence & (1 << 15)) != 0} (Exact), {(precedence & (1 << 14)) != 0} (Subset), {(precedence & (1 << 13)) != 0} (Dominance), {(precedence & 3)} (Bonus)");
         }
     }
 
