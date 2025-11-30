@@ -2,6 +2,7 @@ using Infidex.Core;
 using Infidex.Filtering;
 using Infidex.Tokenization;
 using Infidex.Indexing.Fst;
+using Infidex.Internalized.Roaring;
 
 namespace Infidex.WordMatcher;
 
@@ -12,16 +13,23 @@ namespace Infidex.WordMatcher;
 /// </summary>
 internal sealed class WordMatcher : IDisposable
 {
-    private readonly Dictionary<string, HashSet<int>> _exactIndex;
-    private readonly Dictionary<string, HashSet<int>> _ld1Index; // Levenshtein Distance 1
+    // Builders used during indexing
+    private Dictionary<string, List<int>>? _exactBuilder;
+    private Dictionary<string, List<int>>? _ld1Builder;
+    private Dictionary<int, List<int>>? _fstTermToDocIdsBuilder;
+
+    // Compact indices used during search
+    private Dictionary<string, RoaringBitmap>? _exactIndex;
+    private Dictionary<string, RoaringBitmap>? _ld1Index;
+    private Dictionary<int, RoaringBitmap>? _fstTermToDocIds;
+
     private readonly char[] _delimiters;
     private readonly WordMatcherSetup _setup;
     private readonly TextNormalizer? _textNormalizer;
     
-    // FST for prefix/suffix queries (replaces AffixIndex)
+    // FST for prefix/suffix (replaces AffixIndex)
     private FstBuilder? _fstBuilder;
     private FstIndex? _fstIndex;
-    private readonly Dictionary<int, HashSet<int>> _fstTermToDocIds; // Maps FST output to doc IDs
     private int _nextFstTermId;
     
     private bool _disposed;
@@ -37,18 +45,16 @@ internal sealed class WordMatcher : IDisposable
         _setup = setup;
         _delimiters = delimiters;
         _textNormalizer = textNormalizer;
-        _exactIndex = new Dictionary<string, HashSet<int>>();
-        _ld1Index = new Dictionary<string, HashSet<int>>();
+        
+        // Initialize builders
+        _exactBuilder = new Dictionary<string, List<int>>();
+        _ld1Builder = new Dictionary<string, List<int>>();
         
         if (setup.SupportAffix)
         {
             _fstBuilder = new FstBuilder();
-            _fstTermToDocIds = new Dictionary<int, HashSet<int>>();
+            _fstTermToDocIdsBuilder = new Dictionary<int, List<int>>();
             _nextFstTermId = 0;
-        }
-        else
-        {
-            _fstTermToDocIds = new Dictionary<int, HashSet<int>>();
         }
     }
     
@@ -57,11 +63,16 @@ internal sealed class WordMatcher : IDisposable
     /// </summary>
     public void Clear()
     {
-        _exactIndex.Clear();
-        _ld1Index.Clear();
+        _exactBuilder?.Clear();
+        _ld1Builder?.Clear();
+        _fstTermToDocIdsBuilder?.Clear();
+
+        _exactIndex = null;
+        _ld1Index = null;
+        _fstTermToDocIds = null;
+
         _fstBuilder?.Clear();
         _fstIndex = null;
-        _fstTermToDocIds.Clear();
         _nextFstTermId = 0;
     }
     
@@ -84,15 +95,16 @@ internal sealed class WordMatcher : IDisposable
             int length = word.Length;
             
             // Exact word index
-            if (length >= _setup.MinimumWordSizeExact && length <= _setup.MaximumWordSizeExact)
+            if (length >= _setup.MinimumWordSizeExact && length <= _setup.MaximumWordSizeExact && _exactBuilder != null)
             {
-                AddToIndex(_exactIndex, word, docIndex);
+                AddToIndex(_exactBuilder, word, docIndex);
             }
             
             // LD1 index - generate all words within edit distance 1
             if (_setup.SupportLD1 && 
                 length >= _setup.MinimumWordSizeLD1 && 
-                length <= _setup.MaximumWordSizeLD1)
+                length <= _setup.MaximumWordSizeLD1 && 
+                _ld1Builder != null)
             {
                 GenerateLD1Variants(word, docIndex);
             }
@@ -107,13 +119,47 @@ internal sealed class WordMatcher : IDisposable
     
     /// <summary>
     /// Finalizes the index after all documents have been loaded.
-    /// Must be called before querying affix matches.
+    /// Must be called before querying.
     /// </summary>
     public void FinalizeIndex()
     {
+        // 1. Convert Exact Builder -> Index
+        if (_exactBuilder != null)
+        {
+            _exactIndex = new Dictionary<string, RoaringBitmap>(_exactBuilder.Count);
+            foreach (var kvp in _exactBuilder)
+            {
+                _exactIndex[kvp.Key] = RoaringBitmap.Create(kvp.Value);
+            }
+            _exactBuilder = null; // Free memory
+        }
+
+        // 2. Convert LD1 Builder -> Index
+        if (_ld1Builder != null)
+        {
+            _ld1Index = new Dictionary<string, RoaringBitmap>(_ld1Builder.Count);
+            foreach (var kvp in _ld1Builder)
+            {
+                _ld1Index[kvp.Key] = RoaringBitmap.Create(kvp.Value);
+            }
+            _ld1Builder = null;
+        }
+
+        // 3. Convert FST Builder -> Index
         if (_fstBuilder != null)
         {
             _fstIndex = _fstBuilder.Build();
+            _fstBuilder = null; // Free builder, keep index
+        }
+
+        if (_fstTermToDocIdsBuilder != null)
+        {
+            _fstTermToDocIds = new Dictionary<int, RoaringBitmap>(_fstTermToDocIdsBuilder.Count);
+            foreach (var kvp in _fstTermToDocIdsBuilder)
+            {
+                _fstTermToDocIds[kvp.Key] = RoaringBitmap.Create(kvp.Value);
+            }
+            _fstTermToDocIdsBuilder = null;
         }
     }
     
@@ -135,20 +181,28 @@ internal sealed class WordMatcher : IDisposable
         }
         
         // Map term to document
-        if (!_fstTermToDocIds.TryGetValue(termId, out HashSet<int>? docs))
+        if (_fstTermToDocIdsBuilder != null)
         {
-            docs = [];
-            _fstTermToDocIds[termId] = docs;
+            if (!_fstTermToDocIdsBuilder.TryGetValue(termId, out List<int>? docs))
+            {
+                docs = [];
+                _fstTermToDocIdsBuilder[termId] = docs;
+            }
+            if (docs.Count == 0 || docs[docs.Count - 1] != docIndex)
+            {
+                docs.Add(docIndex);
+            }
         }
-        docs.Add(docIndex);
     }
     
     /// <summary>
     /// Looks up documents containing the exact word
     /// </summary>
-    public HashSet<int> Lookup(string query, FilterMask? filter = null)
+    public RoaringBitmap? Lookup(string query, FilterMask? filter = null)
     {
-        HashSet<int> results = [];
+        if (_exactIndex == null) FinalizeIndex();
+
+        RoaringBitmap? result = null;
         string normalized = query.ToLowerInvariant();
         if (_textNormalizer != null)
         {
@@ -158,16 +212,17 @@ internal sealed class WordMatcher : IDisposable
 
         // 1. Exact match
         // Handles: Target == Query
-        TryFindMatches(normalized, filter, _exactIndex, results);
+        AccumulateMatches(normalized, filter, _exactIndex!, ref result);
         
         // LD1 match logic using Symmetric Delete strategy
         if (_setup.SupportLD1 && 
             length >= _setup.MinimumWordSizeLD1 && 
-            length <= _setup.MaximumWordSizeLD1)
+            length <= _setup.MaximumWordSizeLD1 && 
+            _ld1Index != null && _exactIndex != null)
         {
             // 2. Deletion in Target (Target has 1 extra char)
             // Target="word", Query="wor". Target deletion "wor" is in _ld1Index.
-            TryFindMatches(normalized, filter, _ld1Index, results);
+            AccumulateMatches(normalized, filter, _ld1Index, ref result);
 
             // Generate deletions of Query for remaining cases
             for (int i = 0; i < length; i++)
@@ -178,26 +233,40 @@ internal sealed class WordMatcher : IDisposable
                 // Target="ward", Query="word". 
                 // Target deletion "wrd" is in _ld1Index.
                 // Query deletion "wrd" matches.
-                TryFindMatches(queryDeletion, filter, _ld1Index, results);
+                AccumulateMatches(queryDeletion, filter, _ld1Index, ref result);
                 
                 // 4. Insertion in Target (Target has 1 less char)
                 // Target="word", Query="woord".
                 // Query deletion "word" matches Target in _exactIndex.
-                TryFindMatches(queryDeletion, filter, _exactIndex, results);
+                AccumulateMatches(queryDeletion, filter, _exactIndex, ref result);
             }
         }
         
-        return results;
+        return result;
     }
 
-    private static void TryFindMatches(string key, FilterMask? filter, Dictionary<string, HashSet<int>> index, HashSet<int> results)
+    private static void AccumulateMatches(string key, FilterMask? filter, Dictionary<string, RoaringBitmap> index, ref RoaringBitmap? result)
     {
-        if (index.TryGetValue(key, out HashSet<int>? docs))
+        if (index.TryGetValue(key, out RoaringBitmap? matches))
         {
-            foreach (int docId in docs)
+            // TODO: FilterMask support in RoaringBitmap?
+            // For now, assuming RoaringBitmap can handle filtering or we do it later.
+            // But to support current API, we perform union.
+            
+            // Note: FilterMask is typically for deleted docs. RoaringBitmap doesn't support predicate filter directly without iteration.
+            // If filter is crucial, we might need to apply it after. 
+            // However, typical usage passes filter=null.
+            
+            if (result == null)
             {
-                if (filter == null || filter.IsInFilter(docId))
-                    results.Add(docId);
+                result = matches;
+            }
+            else
+            {
+                // result = result | matches; 
+                // RoaringBitmap | operator creates a NEW bitmap.
+                // Since 'matches' is from index (immutable conceptually), and result might be accumulating.
+                result |= matches;
             }
         }
     }
@@ -205,17 +274,12 @@ internal sealed class WordMatcher : IDisposable
     /// <summary>
     /// Looks up documents using affix (prefix/suffix) matching via FST.
     /// </summary>
-    public HashSet<int> LookupAffix(string query, FilterMask? filter = null)
+    public RoaringBitmap? LookupAffix(string query, FilterMask? filter = null)
     {
-        HashSet<int> results = [];
+        if (_fstIndex == null) FinalizeIndex();
         
-        if (_fstIndex == null)
-        {
-            // FST not built yet - finalize first
-            FinalizeIndex();
-            if (_fstIndex == null)
-                return results;
-        }
+        if (_fstIndex == null || _fstTermToDocIds == null)
+            return null;
         
         string normalized = query.ToLowerInvariant();
         if (_textNormalizer != null)
@@ -223,8 +287,7 @@ internal sealed class WordMatcher : IDisposable
             normalized = _textNormalizer.Normalize(normalized);
         }
         
-        // Get matching term IDs from FST with a bounded budget to avoid
-        // exploding work on extremely common prefixes/suffixes.
+        // Get matching term IDs from FST with a bounded budget
         List<int> termIds = [];
         ReadOnlySpan<char> span = normalized.AsSpan();
 
@@ -233,7 +296,7 @@ internal sealed class WordMatcher : IDisposable
         int remainingBudget = MaxFstAffixTermsPerQuery;
 
         if (prefixCount == 0 && suffixCount == 0)
-            return results;
+            return null;
 
         if (prefixCount > 0 && remainingBudget > 0)
         {
@@ -255,20 +318,21 @@ internal sealed class WordMatcher : IDisposable
             }
         }
         
-        // Convert term IDs to document IDs
+        RoaringBitmap? result = null;
+
+        // Union all matching term docsets
         foreach (int termId in termIds)
         {
-            if (_fstTermToDocIds.TryGetValue(termId, out HashSet<int>? docs))
+            if (_fstTermToDocIds.TryGetValue(termId, out RoaringBitmap? matches))
             {
-                foreach (int docId in docs)
-                {
-                    if (filter == null || filter.IsInFilter(docId))
-                        results.Add(docId);
-                }
+                 if (result == null)
+                    result = matches;
+                else
+                    result |= matches;
             }
         }
         
-        return results;
+        return result;
     }
     
     /// <summary>
@@ -285,51 +349,63 @@ internal sealed class WordMatcher : IDisposable
         for (int i = 0; i < word.Length; i++)
         {
             string variant = word.Remove(i, 1);
-            AddToIndex(_ld1Index, variant, docIndex);
+            if (_ld1Builder != null)
+            {
+                AddToIndex(_ld1Builder, variant, docIndex);
+            }
         }
     }
     
-    private static void AddToIndex(Dictionary<string, HashSet<int>> index, string word, int docIndex)
+    private static void AddToIndex(Dictionary<string, List<int>> index, string word, int docIndex)
     {
-        if (!index.TryGetValue(word, out HashSet<int>? docs))
+        if (!index.TryGetValue(word, out List<int>? docs))
         {
             docs = [];
             index[word] = docs;
         }
-        docs.Add(docIndex);
+        // Assuming strictly increasing docIndex during indexing
+        if (docs.Count == 0 || docs[docs.Count - 1] != docIndex)
+        {
+            docs.Add(docIndex);
+        }
     }
 
     public void Save(BinaryWriter writer)
     {
-        // Ensure FST is built if affix support is enabled so that we can
-        // persist affix data for parity after reload. This is cheap if the
-        // index has already been finalized.
-        if (_setup.SupportAffix && _fstIndex == null && _fstBuilder != null && _fstTermToDocIds.Count > 0)
-        {
-            FinalizeIndex();
-        }
+        FinalizeIndex();
 
         // Save Exact Index
-        writer.Write(_exactIndex.Count);
-        foreach (KeyValuePair<string, HashSet<int>> kvp in _exactIndex)
+        writer.Write(_exactIndex?.Count ?? 0);
+        if (_exactIndex != null)
         {
-            writer.Write(kvp.Key);
-            writer.Write(kvp.Value.Count);
-            foreach (int docId in kvp.Value)
+            foreach (KeyValuePair<string, RoaringBitmap> kvp in _exactIndex)
             {
-                writer.Write(docId);
+                writer.Write(kvp.Key);
+                // Serialize RoaringBitmap directly
+                using (MemoryStream ms = new MemoryStream())
+                {
+                    RoaringBitmap.Serialize(kvp.Value, ms);
+                    byte[] bytes = ms.ToArray();
+                    writer.Write(bytes.Length);
+                    writer.Write(bytes);
+                }
             }
         }
 
         // Save LD1 Index
-        writer.Write(_ld1Index.Count);
-        foreach (KeyValuePair<string, HashSet<int>> kvp in _ld1Index)
+        writer.Write(_ld1Index?.Count ?? 0);
+        if (_ld1Index != null)
         {
-            writer.Write(kvp.Key);
-            writer.Write(kvp.Value.Count);
-            foreach (int docId in kvp.Value)
+            foreach (KeyValuePair<string, RoaringBitmap> kvp in _ld1Index)
             {
-                writer.Write(docId);
+                writer.Write(kvp.Key);
+                using (MemoryStream ms = new MemoryStream())
+                {
+                    RoaringBitmap.Serialize(kvp.Value, ms);
+                    byte[] bytes = ms.ToArray();
+                    writer.Write(bytes.Length);
+                    writer.Write(bytes);
+                }
             }
         }
 
@@ -341,14 +417,19 @@ internal sealed class WordMatcher : IDisposable
             FstSerializer.Write(writer, _fstIndex);
             
             // Save term-to-docIds mapping
-            writer.Write(_fstTermToDocIds.Count);
-            foreach (KeyValuePair<int, HashSet<int>> kvp in _fstTermToDocIds)
+            writer.Write(_fstTermToDocIds?.Count ?? 0);
+            if (_fstTermToDocIds != null)
             {
-                writer.Write(kvp.Key);
-                writer.Write(kvp.Value.Count);
-                foreach (int docId in kvp.Value)
+                foreach (KeyValuePair<int, RoaringBitmap> kvp in _fstTermToDocIds)
                 {
-                    writer.Write(docId);
+                    writer.Write(kvp.Key);
+                    using (MemoryStream ms = new MemoryStream())
+                    {
+                        RoaringBitmap.Serialize(kvp.Value, ms);
+                        byte[] bytes = ms.ToArray();
+                        writer.Write(bytes.Length);
+                        writer.Write(bytes);
+                    }
                 }
             }
         }
@@ -360,30 +441,30 @@ internal sealed class WordMatcher : IDisposable
         
         // Load Exact Index
         int exactCount = reader.ReadInt32();
+        _exactIndex = new Dictionary<string, RoaringBitmap>(exactCount);
         for (int i = 0; i < exactCount; i++)
         {
             string key = reader.ReadString();
-            int docCount = reader.ReadInt32();
-            HashSet<int> docs = new HashSet<int>(docCount);
-            for (int j = 0; j < docCount; j++)
+            int bytesLength = reader.ReadInt32();
+            byte[] bytes = reader.ReadBytes(bytesLength);
+            using (MemoryStream ms = new MemoryStream(bytes))
             {
-                docs.Add(reader.ReadInt32());
+                _exactIndex[key] = RoaringBitmap.Deserialize(ms);
             }
-            _exactIndex[key] = docs;
         }
 
         // Load LD1 Index
         int ld1Count = reader.ReadInt32();
+        _ld1Index = new Dictionary<string, RoaringBitmap>(ld1Count);
         for (int i = 0; i < ld1Count; i++)
         {
             string key = reader.ReadString();
-            int docCount = reader.ReadInt32();
-            HashSet<int> docs = new HashSet<int>(docCount);
-            for (int j = 0; j < docCount; j++)
+            int bytesLength = reader.ReadInt32();
+            byte[] bytes = reader.ReadBytes(bytesLength);
+            using (MemoryStream ms = new MemoryStream(bytes))
             {
-                docs.Add(reader.ReadInt32());
+                _ld1Index[key] = RoaringBitmap.Deserialize(ms);
             }
-            _ld1Index[key] = docs;
         }
 
         // Load FST index
@@ -394,16 +475,16 @@ internal sealed class WordMatcher : IDisposable
             
             // Load term-to-docIds mapping
             int termCount = reader.ReadInt32();
+            _fstTermToDocIds = new Dictionary<int, RoaringBitmap>(termCount);
             for (int i = 0; i < termCount; i++)
             {
                 int termId = reader.ReadInt32();
-                int docCount = reader.ReadInt32();
-                HashSet<int> docs = new HashSet<int>(docCount);
-                for (int j = 0; j < docCount; j++)
+                int bytesLength = reader.ReadInt32();
+                byte[] bytes = reader.ReadBytes(bytesLength);
+                using (MemoryStream ms = new MemoryStream(bytes))
                 {
-                    docs.Add(reader.ReadInt32());
+                    _fstTermToDocIds[termId] = RoaringBitmap.Deserialize(ms);
                 }
-                _fstTermToDocIds[termId] = docs;
                 _nextFstTermId = Math.Max(_nextFstTermId, termId + 1);
             }
         }

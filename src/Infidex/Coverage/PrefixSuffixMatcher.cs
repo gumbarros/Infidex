@@ -213,5 +213,3 @@ internal static class PrefixSuffixMatcher
         }
     }
 }
-
-

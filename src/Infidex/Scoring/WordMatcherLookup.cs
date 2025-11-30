@@ -1,4 +1,5 @@
 using Infidex.Coverage;
+using Infidex.Internalized.Roaring;
 
 namespace Infidex.Scoring;
 
@@ -7,14 +8,14 @@ namespace Infidex.Scoring;
 /// </summary>
 internal static class WordMatcherLookup
 {
-    public static HashSet<int> Execute(
+    public static RoaringBitmap Execute(
         string queryText,
         WordMatcher.WordMatcher? wordMatcher,
         CoverageSetup? coverageSetup,
         char[] delimiters,
         bool enableDebugLogging)
     {
-        HashSet<int> result = [];
+        RoaringBitmap result = RoaringBitmap.Create([]); // Empty bitmap
 
         if (wordMatcher == null)
         {
@@ -33,28 +34,36 @@ internal static class WordMatcherLookup
             if (string.IsNullOrWhiteSpace(word) || word.Length < 2)
                 continue;
 
-            HashSet<int> ids = wordMatcher.Lookup(word, filter: null);
-            if (enableDebugLogging)
-                Console.WriteLine($"[DEBUG] WordMatcher Lookup('{word}'): {ids.Count} exact/LD1 matches");
-
-            foreach (int id in ids)
-                result.Add(id);
+            RoaringBitmap? ids = wordMatcher.Lookup(word, filter: null);
+            if (ids != null)
+            {
+                if (enableDebugLogging)
+                    Console.WriteLine($"[DEBUG] WordMatcher Lookup('{word}'): {ids.Cardinality} exact/LD1 matches");
+                
+                result |= ids;
+            }
+            else
+            {
+                if (enableDebugLogging)
+                    Console.WriteLine($"[DEBUG] WordMatcher Lookup('{word}'): 0 exact/LD1 matches");
+            }
 
             if (coverageSetup != null && coverageSetup.CoverPrefixSuffix)
             {
-                HashSet<int> affixIds = wordMatcher.LookupAffix(word, filter: null);
-                if (enableDebugLogging)
-                    Console.WriteLine($"[DEBUG] WordMatcher LookupAffix('{word}'): {affixIds.Count} affix matches");
-
-                foreach (int id in affixIds)
-                    result.Add(id);
+                RoaringBitmap? affixIds = wordMatcher.LookupAffix(word, filter: null);
+                if (affixIds != null)
+                {
+                    if (enableDebugLogging)
+                        Console.WriteLine($"[DEBUG] WordMatcher LookupAffix('{word}'): {affixIds.Cardinality} affix matches");
+                    
+                    result |= affixIds;
+                }
             }
         }
 
         if (enableDebugLogging)
-            Console.WriteLine($"[DEBUG] WordMatcher total: {result.Count} matches");
+            Console.WriteLine($"[DEBUG] WordMatcher total: {result.Cardinality} matches");
 
         return result;
     }
 }
-

@@ -23,7 +23,8 @@ public class WordMatcherTests
         
         var results = matcher.Lookup("world");
         
-        Assert.AreEqual(2, results.Count);
+        Assert.IsNotNull(results);
+        Assert.AreEqual(2, results.Cardinality);
         Assert.IsTrue(results.Contains(0));
         Assert.IsTrue(results.Contains(1));
     }
@@ -45,7 +46,8 @@ public class WordMatcherTests
         // "batmam" is 1 edit away from "batman"
         var results = matcher.Lookup("batmam");
         
-        Assert.IsTrue(results.Count > 0);
+        Assert.IsNotNull(results);
+        Assert.IsTrue(results.Cardinality > 0);
         Assert.IsTrue(results.Contains(0));
     }
     
@@ -65,9 +67,8 @@ public class WordMatcherTests
         // "bat" is a prefix of "batman"
         var results = matcher.LookupAffix("bat");
         
-        Assert.IsTrue(results.Count > 0);
+        Assert.IsNotNull(results);
+        Assert.IsTrue(results.Cardinality > 0);
         Assert.IsTrue(results.Contains(0));
     }
 }
-
-

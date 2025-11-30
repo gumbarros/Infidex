@@ -113,7 +113,7 @@ internal static class FusionScorer
                         }
                     }
                     
-                    if (candidatePower > otherTermsPower)
+                    if (candidatePower >= otherTermsPower)
                     {
                         hasDominantTerm = true;
                         dominantTermIndex = candidateIdx;

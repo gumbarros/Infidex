@@ -5,6 +5,7 @@ using Infidex.Internalized.CommunityToolkit;
 using Infidex.Utilities;
 using Infidex.Synonyms;
 using System.Diagnostics;
+using Infidex.Internalized.Roaring;
 
 namespace Infidex.Scoring;
 
@@ -332,7 +333,7 @@ internal sealed class SearchPipeline
         if (perfStopwatch != null) prescreenMs = perfStopwatch.ElapsedMilliseconds - prescreenStart;
 
         long wmLookupStart = perfStopwatch?.ElapsedMilliseconds ?? 0;
-        HashSet<int> wordMatcherInternalIds = WordMatcherLookup.Execute(
+        RoaringBitmap wordMatcherInternalIds = WordMatcherLookup.Execute(
             searchText, _wordMatcher, _coverageSetup,
             _vectorModel.Tokenizer.TokenizerSetup?.Delimiters ?? [' '],
             EnableDebugLogging);
@@ -358,21 +359,41 @@ internal sealed class SearchPipeline
             int minStemLength = _vectorModel.Tokenizer.IndexSizes.Min();
 
             long prepStart = perfStopwatch?.ElapsedMilliseconds ?? 0;
-            string[] queryTokens = searchText.Split(delimiters, StringSplitOptions.RemoveEmptyEntries);
+            
+            // Prepare coverage query context once to avoid allocations per document
+            using var coverageContext = _coverageEngine.PrepareQuery(searchText);
+            // Create buffer for reuse
+            using var buffer = new CoverageBuffer();
 
             HashSet<int> tfidfInternalIds = BuildTfidfInternalIdSet(topCandidates);
             (List<int> wmOverlapping, List<int> wmUnique) = PartitionWordMatcherCandidates(wordMatcherInternalIds, tfidfInternalIds);
 
             int wmLimit = Math.Max(0, coverageDepth - wmOverlapping.Count);
-            List<int> wmToProcess = wmOverlapping.Concat(wmUnique.Take(wmLimit)).ToList();
+            // Optimization: Process overlapping candidates first, then unique ones up to the limit
+            // This order is important for prioritizing documents that matched both stages
+            
             if (perfStopwatch != null) prepMs = perfStopwatch.ElapsedMilliseconds - prepStart;
 
             long wmCoverageStart = perfStopwatch?.ElapsedMilliseconds ?? 0;
-            foreach (int internalId in wmToProcess)
+            
+            // Process overlapping matches
+            foreach (int internalId in wmOverlapping)
             {
-                ProcessCandidate(internalId, searchText, queryTokens, coverageSetup, 0f,
+                ProcessCandidate(internalId, coverageContext, buffer, coverageSetup, 0f,
                     ref bestSegmentsMap, lcsAndWordHitsSpan, documentKeyToIndex,
                     finalScores, ref maxWordHits, delimiters, minStemLength);
+            }
+
+            // Process unique word matches up to limit
+            int processedUnique = 0;
+            foreach (int internalId in wmUnique)
+            {
+                if (processedUnique >= wmLimit) break;
+                
+                ProcessCandidate(internalId, coverageContext, buffer, coverageSetup, 0f,
+                    ref bestSegmentsMap, lcsAndWordHitsSpan, documentKeyToIndex,
+                    finalScores, ref maxWordHits, delimiters, minStemLength);
+                processedUnique++;
             }
 
             if (perfStopwatch != null) wordMatcherCoverageMs = perfStopwatch.ElapsedMilliseconds - wmCoverageStart;
@@ -387,14 +408,14 @@ internal sealed class SearchPipeline
                 float maxTfidf = topCandidates.Length > 0 ? topCandidates[0].Score : 1f;
                 float normBm25 = maxTfidf > 0 ? candidate.Score / maxTfidf : 0f;
 
-                ProcessCandidate(doc.Id, searchText, queryTokens, coverageSetup, normBm25,
+                ProcessCandidate(doc.Id, coverageContext, buffer, coverageSetup, normBm25,
                     ref bestSegmentsMap, lcsAndWordHitsSpan, documentKeyToIndex,
                     finalScores, ref maxWordHits, delimiters, minStemLength);
             }
 
             if (perfStopwatch != null) tfidfCoverageMs = perfStopwatch.ElapsedMilliseconds - tfidfCoverageStart;
 
-            if (maxWordHits == 0 && wordMatcherInternalIds.Count == 0)
+            if (maxWordHits == 0 && wordMatcherInternalIds.Cardinality == 0)
                 return [];
 
             ScoreEntry[] finalCandidates = finalScores.GetTopK();
@@ -427,8 +448,8 @@ internal sealed class SearchPipeline
 
     private void ProcessCandidate(
         int internalId,
-        string searchText,
-        string[] queryTokens,
+        CoverageQueryContext coverageContext,
+        CoverageBuffer buffer,
         CoverageSetup coverageSetup,
         float baseScore,
         ref Dictionary<int, byte>? bestSegmentsMap,
@@ -450,14 +471,21 @@ internal sealed class SearchPipeline
             doc, bestSegmentsMap, _vectorModel.Documents, _vectorModel.Tokenizer.TextNormalizer);
 
         string coverageDocText = docText;
-        string coverageQueryText = searchText;
+        
+        // Note: Canonicalization might change the query text, which invalidates our precomputed context.
+        // If canonicalization is required, we might need to either:
+        // 1. Canonicalize query upfront (in PrepareQuery or before)
+        // 2. Fallback to slow path if canonicalization changes the query
+        // Currently, SearchEngine canonicalizes the query BEFORE calling pipeline, so coverageContext.Query 
+        // should already be canonicalized relative to synonyms.
+        
         if (_synonymMap != null &&
             _synonymMap.HasCanonicalMappings &&
             _vectorModel.Tokenizer.TokenizerSetup != null)
         {
             char[] delims = _vectorModel.Tokenizer.TokenizerSetup.Delimiters;
             coverageDocText = _synonymMap.CanonicalizeText(coverageDocText, delims);
-            coverageQueryText = _synonymMap.CanonicalizeText(coverageQueryText, delims);
+            // coverageQueryText is already canonicalized in SearchEngine.Search
         }
 
         int lcsFromSpan = 0;
@@ -467,17 +495,19 @@ internal sealed class SearchPipeline
             if (lcsFromSpan == 0)
             {
                 int errorTolerance = 0;
-                if (coverageQueryText.Length >= coverageSetup.CoverageQLimitForErrorTolerance)
-                    errorTolerance = (int)(coverageQueryText.Length * coverageSetup.CoverageLcsErrorToleranceRelativeq);
+                if (coverageContext.Query.Length >= coverageSetup.CoverageQLimitForErrorTolerance)
+                    errorTolerance = (int)(coverageContext.Query.Length * coverageSetup.CoverageLcsErrorToleranceRelativeq);
 
-                lcsFromSpan = SegmentProcessor.CalculateLcs(coverageQueryText, coverageDocText, errorTolerance);
+                lcsFromSpan = SegmentProcessor.CalculateLcs(coverageContext.Query, coverageDocText, errorTolerance);
                 lcsAndWordHitsSpan[0, docIndex] = (byte)Math.Min(lcsFromSpan, 255);
             }
         }
 
-        CoverageFeatures features = _coverageEngine!.CalculateFeatures(coverageQueryText, coverageDocText, lcsFromSpan, internalId);
+        // Use the optimized overload taking context and buffer
+        CoverageFeatures features = _coverageEngine!.CalculateFeatures(coverageContext, coverageDocText, lcsFromSpan, buffer, internalId);
+        
         (float finalScore, byte tiebreaker) = FusionScorer.Calculate(
-            coverageQueryText,
+            coverageContext.Query,
             coverageDocText,
             features,
             baseScore,
@@ -493,7 +523,7 @@ internal sealed class SearchPipeline
 
     private (HashSet<long> uniqueDocKeys, Dictionary<long, int> documentKeyToIndex) BuildDocumentKeyIndex(
         ScoreEntry[] topCandidates,
-        HashSet<int> wordMatcherInternalIds)
+        RoaringBitmap wordMatcherInternalIds)
     {
         HashSet<long> uniqueDocKeys = [];
         foreach (ScoreEntry candidate in topCandidates)
@@ -528,7 +558,7 @@ internal sealed class SearchPipeline
     }
 
     private static (List<int> overlapping, List<int> unique) PartitionWordMatcherCandidates(
-        HashSet<int> wordMatcherInternalIds,
+        RoaringBitmap wordMatcherInternalIds,
         HashSet<int> tfidfInternalIds)
     {
         List<int> overlapping = [];

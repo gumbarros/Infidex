@@ -6,6 +6,42 @@ using Infidex.Indexing;
 
 namespace Infidex.Coverage;
 
+public sealed class CoverageQueryContext : IDisposable
+{
+    public string Query { get; }
+    internal StringSlice[] QueryTokenArray { get; }
+    public int QueryTokenCount { get; }
+    public float[] TermIdf { get; }
+    public int[] TermMaxChars { get; }
+    public float[]? WordLevelIdf { get; }
+
+    internal CoverageQueryContext(
+        string query,
+        StringSlice[] queryTokenArray,
+        int queryTokenCount,
+        float[] termIdf,
+        int[] termMaxChars,
+        float[]? wordLevelIdf)
+    {
+        Query = query;
+        QueryTokenArray = queryTokenArray;
+        QueryTokenCount = queryTokenCount;
+        TermIdf = termIdf;
+        TermMaxChars = termMaxChars;
+        WordLevelIdf = wordLevelIdf;
+    }
+
+    public void Dispose()
+    {
+        if (QueryTokenArray.Length > 0)
+            ArrayPool<StringSlice>.Shared.Return(QueryTokenArray);
+        if (TermIdf.Length > 0)
+            ArrayPool<float>.Shared.Return(TermIdf);
+        if (TermMaxChars.Length > 0)
+            ArrayPool<int>.Shared.Return(TermMaxChars);
+    }
+}
+
 public class CoverageEngine
 {
     private readonly Tokenizer _tokenizer;
@@ -20,6 +56,73 @@ public class CoverageEngine
     {
         _tokenizer = tokenizer;
         _setup = setup ?? CoverageSetup.CreateDefault();
+    }
+
+    public CoverageQueryContext PrepareQuery(string query)
+    {
+        if (string.IsNullOrEmpty(query))
+            return new CoverageQueryContext(query, [], 0, [], [], null);
+
+        ReadOnlySpan<char> delimiters = _tokenizer.TokenizerSetup?.Delimiters ?? [' '];
+        int queryLen = query.Length;
+        int maxQueryTokens = queryLen / 2 + 1;
+        
+        StringSlice[] queryTokenArray = ArrayPool<StringSlice>.Shared.Rent(maxQueryTokens);
+        int qCountRaw = CoverageTokenizer.TokenizeToSpan(query, queryTokenArray, _setup.MinWordSize, delimiters);
+
+        if (qCountRaw == 0)
+        {
+            ArrayPool<StringSlice>.Shared.Return(queryTokenArray);
+            return new CoverageQueryContext(query, [], 0, [], [], null);
+        }
+
+        ReadOnlySpan<char> querySpan = query.AsSpan();
+        int qCount = CoverageTokenizer.DeduplicateQueryTokens(queryTokenArray, qCountRaw, querySpan);
+
+        int[] termMaxChars = ArrayPool<int>.Shared.Rent(qCount);
+        float[] termIdf = ArrayPool<float>.Shared.Rent(qCount);
+
+        // Precompute per-query term IDF
+        if (_termCollection != null && _totalDocuments > 0)
+        {
+            if (!_queryIdfCache.TryGetValue(query, out float[]? cached) || cached.Length < qCount)
+            {
+                cached = new float[qCount];
+                for (int i = 0; i < qCount; i++)
+                {
+                    cached[i] = ComputeTermIdf(queryTokenArray[i], querySpan);
+                }
+                _queryIdfCache[query] = cached;
+            }
+
+            for (int i = 0; i < qCount; i++)
+            {
+                termMaxChars[i] = queryTokenArray[i].Length;
+                termIdf[i] = cached[i];
+            }
+        }
+        else
+        {
+            for (int i = 0; i < qCount; i++)
+            {
+                termMaxChars[i] = queryTokenArray[i].Length;
+                termIdf[i] = MathF.Log2(termMaxChars[i] + 1);
+            }
+        }
+
+        float[]? wordLevelIdfArray = null;
+        if (_wordIdfCache != null && qCount > 0)
+        {
+            wordLevelIdfArray = new float[qCount];
+            for (int i = 0; i < qCount; i++)
+            {
+                StringSlice tokenSlice = queryTokenArray[i];
+                string token = query.Substring(tokenSlice.Offset, tokenSlice.Length);
+                wordLevelIdfArray[i] = _wordIdfCache.TryGetValue(token, out float idf) ? idf : 0f;
+            }
+        }
+
+        return new CoverageQueryContext(query, queryTokenArray, qCount, termIdf, termMaxChars, wordLevelIdfArray);
     }
     
     /// <summary>
@@ -52,18 +155,30 @@ public class CoverageEngine
     
     public byte CalculateCoverageScore(string query, string documentText, double lcsSum, out int wordHits, int documentId = -1)
     {
-        CoverageResult result = CalculateCoverageInternal(query, documentText, lcsSum, documentId, out wordHits, 
-            out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _);
+        using var context = PrepareQuery(query);
+        // Create a temporary buffer for single usage
+        using var buffer = new CoverageBuffer();
+        CoverageResult result = CalculateCoverageInternal(context, documentText, lcsSum, documentId, buffer,
+            out wordHits, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _);
         return result.CoverageScore;
     }
 
     public CoverageFeatures CalculateFeatures(string query, string documentText, double lcsSum, int documentId = -1)
     {
+        using var context = PrepareQuery(query);
+        using var buffer = new CoverageBuffer();
+        return CalculateFeatures(context, documentText, lcsSum, buffer, documentId);
+    }
+
+    // Overload used by optimized pipeline
+    internal CoverageFeatures CalculateFeatures(CoverageQueryContext context, string documentText, double lcsSum, CoverageBuffer buffer, int documentId = -1)
+    {
         CoverageResult result = CalculateCoverageInternal(
-            query,
+            context,
             documentText,
             lcsSum,
             documentId,
+            buffer,
             out int wordHits,
             out int docTokenCount,
             out int termsWithAnyMatch,
@@ -104,7 +219,7 @@ public class CoverageEngine
             fusionSignals);
     }
 
-    private CoverageResult CalculateCoverageInternal(string query, string documentText, double lcsSum, int documentId,
+    private CoverageResult CalculateCoverageInternal(CoverageQueryContext context, string documentText, double lcsSum, int documentId, CoverageBuffer buffer,
         out int wordHits,
         out int docTokenCount,
         out int termsWithAnyMatch,
@@ -131,145 +246,73 @@ public class CoverageEngine
         lastTokenHasPrefix = false;
         fusionSignals = default;
         
-        if (query.Length == 0) 
+        if (context.QueryTokenCount == 0) 
             return new CoverageResult(0, 0, -1, 0);
 
         ReadOnlySpan<char> delimiters = _tokenizer.TokenizerSetup?.Delimiters ?? [' '];
-        int queryLen = query.Length;
         int docLen = documentText.Length;
+        int qCount = context.QueryTokenCount;
 
-        // Allocate token arrays
-        int maxQueryTokens = queryLen / 2 + 1;
-        StringSlice[]? queryTokenArray = null;
-        Span<StringSlice> queryTokens = maxQueryTokens <= CoverageTokenizer.MaxStackTerms 
-            ? stackalloc StringSlice[maxQueryTokens] 
-            : (queryTokenArray = ArrayPool<StringSlice>.Shared.Rent(maxQueryTokens));
+        // Ensure buffer capacity for query (should be done once per query really, but cheap here)
+        buffer.EnsureQueryCapacity(qCount);
 
-        int qCountRaw = CoverageTokenizer.TokenizeToSpan(query, queryTokens, _setup.MinWordSize, delimiters);
-        if (qCountRaw == 0)
-        {
-            if (queryTokenArray != null) ArrayPool<StringSlice>.Shared.Return(queryTokenArray);
-            fusionSignals = default;
-            return new CoverageResult(0, 0, -1, 0);
-        }
-
-        ReadOnlySpan<char> querySpan = query.AsSpan();
-        int qCount = CoverageTokenizer.DeduplicateQueryTokens(queryTokens, qCountRaw, querySpan);
+        // Use pre-tokenized query data
+        Span<StringSlice> queryTokens = context.QueryTokenArray.AsSpan(0, qCount);
+        ReadOnlySpan<char> querySpan = context.Query.AsSpan();
 
         int maxDocTokens = docLen / 2 + 1;
-        StringSlice[]? docTokenArray = null;
-        Span<StringSlice> docTokens = maxDocTokens <= CoverageTokenizer.MaxStackTerms
-            ? stackalloc StringSlice[maxDocTokens]
-            : (docTokenArray = ArrayPool<StringSlice>.Shared.Rent(maxDocTokens));
+        buffer.EnsureDocCapacity(maxDocTokens);
+        
+        Span<StringSlice> docTokens = buffer.DocTokenArray.AsSpan(0, maxDocTokens);
 
         ReadOnlySpan<char> docSpan = documentText.AsSpan();
         int dCountRaw = CoverageTokenizer.TokenizeToSpan(documentText, docTokens, _setup.MinWordSize, delimiters);
         docTokenCount = dCountRaw;
 
-        StringSlice[]? uniqueDocTokenArray = null;
-        Span<StringSlice> uniqueDocTokens = dCountRaw <= CoverageTokenizer.MaxStackTerms
-            ? stackalloc StringSlice[dCountRaw]
-            : (uniqueDocTokenArray = ArrayPool<StringSlice>.Shared.Rent(dCountRaw));
+        Span<StringSlice> uniqueDocTokens = buffer.UniqueDocTokenArray.AsSpan(0, dCountRaw);
 
-        int dCount = CoverageTokenizer.DeduplicateDocTokens(docTokens, dCountRaw, uniqueDocTokens, docSpan);
+        int dCount = CoverageTokenizer.DeduplicateDocTokens(docTokens.Slice(0, dCountRaw), dCountRaw, uniqueDocTokens, docSpan);
 
-        // Tracking arrays
-        bool[]? qActiveArray = null;
-        Span<bool> qActive = qCount <= CoverageTokenizer.MaxStackTerms 
-            ? stackalloc bool[qCount] 
-            : (qActiveArray = ArrayPool<bool>.Shared.Rent(qCount));
-        qActive[..qCount].Fill(true);
+        // Tracking arrays from buffer
+        Span<bool> qActive = buffer.QActiveArray.AsSpan(0, qCount);
+        qActive.Fill(true);
 
-        bool[]? dActiveArray = null;
-        Span<bool> dActive = dCount <= CoverageTokenizer.MaxStackTerms
-            ? stackalloc bool[dCount]
-            : (dActiveArray = ArrayPool<bool>.Shared.Rent(dCount));
-        dActive[..dCount].Fill(true);
+        Span<bool> dActive = buffer.DActiveArray.AsSpan(0, dCount);
+        dActive.Fill(true);
 
-        float[]? termMatchedCharsArray = null;
-        Span<float> termMatchedChars = qCount <= CoverageTokenizer.MaxStackTerms
-            ? stackalloc float[qCount]
-            : (termMatchedCharsArray = ArrayPool<float>.Shared.Rent(qCount));
-        termMatchedChars[..qCount].Clear();
+        Span<float> termMatchedChars = buffer.TermMatchedCharsArray.AsSpan(0, qCount);
+        termMatchedChars.Clear();
 
-        int[]? termMaxCharsArray = null;
-        Span<int> termMaxChars = qCount <= CoverageTokenizer.MaxStackTerms
-            ? stackalloc int[qCount]
-            : (termMaxCharsArray = ArrayPool<int>.Shared.Rent(qCount));
+        // Use precomputed TermMaxChars/TermIdf
+        Span<int> termMaxChars = context.TermMaxChars.AsSpan(0, qCount);
+        Span<float> termIdf = context.TermIdf.AsSpan(0, qCount);
         
-        bool[]? termHasWholeArray = null;
-        Span<bool> termHasWhole = qCount <= CoverageTokenizer.MaxStackTerms
-            ? stackalloc bool[qCount]
-            : (termHasWholeArray = ArrayPool<bool>.Shared.Rent(qCount));
-        termHasWhole[..qCount].Clear();
+        Span<bool> termHasWhole = buffer.TermHasWholeArray.AsSpan(0, qCount);
+        termHasWhole.Clear();
 
-        bool[]? termHasJoinedArray = null;
-        Span<bool> termHasJoined = qCount <= CoverageTokenizer.MaxStackTerms
-            ? stackalloc bool[qCount]
-            : (termHasJoinedArray = ArrayPool<bool>.Shared.Rent(qCount));
-        termHasJoined[..qCount].Clear();
+        Span<bool> termHasJoined = buffer.TermHasJoinedArray.AsSpan(0, qCount);
+        termHasJoined.Clear();
 
-        bool[]? termHasPrefixArray = null;
-        Span<bool> termHasPrefix = qCount <= CoverageTokenizer.MaxStackTerms
-            ? stackalloc bool[qCount]
-            : (termHasPrefixArray = ArrayPool<bool>.Shared.Rent(qCount));
-        termHasPrefix[..qCount].Clear();
+        Span<bool> termHasPrefix = buffer.TermHasPrefixArray.AsSpan(0, qCount);
+        termHasPrefix.Clear();
 
-        int[]? termFirstPosArray = null;
-        Span<int> termFirstPos = qCount <= CoverageTokenizer.MaxStackTerms
-            ? stackalloc int[qCount]
-            : (termFirstPosArray = ArrayPool<int>.Shared.Rent(qCount));
-        termFirstPos[..qCount].Fill(-1);
-
-        float[]? termIdfArray = null;
-        Span<float> termIdf = qCount <= CoverageTokenizer.MaxStackTerms
-            ? stackalloc float[qCount]
-            : (termIdfArray = ArrayPool<float>.Shared.Rent(qCount));
-
-        // Precompute per-query term IDF once per distinct query text to avoid
-        // repeating n-gram lookups for every candidate document.
-        if (_termCollection != null && _totalDocuments > 0)
-        {
-            if (!_queryIdfCache.TryGetValue(query, out float[]? cached) || cached.Length < qCount)
-            {
-                cached = new float[qCount];
-                for (int i = 0; i < qCount; i++)
-                {
-                    cached[i] = ComputeTermIdf(queryTokens[i], querySpan);
-                }
-                _queryIdfCache[query] = cached;
-            }
-
-            for (int i = 0; i < qCount; i++)
-            {
-                termMaxChars[i] = queryTokens[i].Length;
-                termIdf[i] = cached[i];
-            }
-        }
-        else
-        {
-            // Fallback: approximate IDF from term length only.
-            for (int i = 0; i < qCount; i++)
-            {
-                termMaxChars[i] = queryTokens[i].Length;
-                termIdf[i] = MathF.Log2(termMaxChars[i] + 1);
-            }
-        }
+        Span<int> termFirstPos = buffer.TermFirstPosArray.AsSpan(0, qCount);
+        termFirstPos.Fill(-1);
 
         // Build MatchState
         MatchState state = new MatchState
         {
-            QueryTokens = queryTokens[..qCount],
-            UniqueDocTokens = uniqueDocTokens[..dCount],
-            QActive = qActive[..qCount],
-            DActive = dActive[..dCount],
-            TermMatchedChars = termMatchedChars[..qCount],
-            TermMaxChars = termMaxChars[..qCount],
-            TermHasWhole = termHasWhole[..qCount],
-            TermHasJoined = termHasJoined[..qCount],
-            TermHasPrefix = termHasPrefix[..qCount],
-            TermFirstPos = termFirstPos[..qCount],
-            TermIdf = termIdf[..qCount],
+            QueryTokens = queryTokens,
+            UniqueDocTokens = uniqueDocTokens.Slice(0, dCount),
+            QActive = qActive,
+            DActive = dActive,
+            TermMatchedChars = termMatchedChars,
+            TermMaxChars = termMaxChars,
+            TermHasWhole = termHasWhole,
+            TermHasJoined = termHasJoined,
+            TermHasPrefix = termHasPrefix,
+            TermFirstPos = termFirstPos,
+            TermIdf = termIdf,
             QuerySpan = querySpan,
             DocSpan = docSpan,
             QCount = qCount,
@@ -277,57 +320,26 @@ public class CoverageEngine
             DocTokenCount = docTokenCount
         };
 
-        try
-        {
-            if (_setup.CoverWholeWords)
-                WholeWordMatcher.Match(ref state);
+        if (_setup.CoverWholeWords)
+            WholeWordMatcher.Match(ref state);
 
-            if (_setup.CoverJoinedWords && qCount > 0)
-                JoinedWordMatcher.Match(ref state);
+        if (_setup.CoverJoinedWords && qCount > 0)
+            JoinedWordMatcher.Match(ref state);
 
-            if (_setup.CoverPrefixSuffix && qCount > 0)
-                PrefixSuffixMatcher.Match(ref state);
+        if (_setup.CoverPrefixSuffix && qCount > 0)
+            PrefixSuffixMatcher.Match(ref state);
 
-            if (_setup.CoverFuzzyWords && qCount > 0 && !FuzzyWordMatcher.AllTermsFullyMatched(ref state))
-                FuzzyWordMatcher.Match(ref state, _setup);
-        }
-        finally
-        {
-            if (queryTokenArray != null) ArrayPool<StringSlice>.Shared.Return(queryTokenArray);
-            if (docTokenArray != null) ArrayPool<StringSlice>.Shared.Return(docTokenArray);
-            if (uniqueDocTokenArray != null) ArrayPool<StringSlice>.Shared.Return(uniqueDocTokenArray);
-            if (qActiveArray != null) ArrayPool<bool>.Shared.Return(qActiveArray);
-            if (dActiveArray != null) ArrayPool<bool>.Shared.Return(dActiveArray);
-            if (termMatchedCharsArray != null) ArrayPool<float>.Shared.Return(termMatchedCharsArray);
-            if (termMaxCharsArray != null) ArrayPool<int>.Shared.Return(termMaxCharsArray);
-            if (termHasWholeArray != null) ArrayPool<bool>.Shared.Return(termHasWholeArray);
-            if (termHasJoinedArray != null) ArrayPool<bool>.Shared.Return(termHasJoinedArray);
-            if (termHasPrefixArray != null) ArrayPool<bool>.Shared.Return(termHasPrefixArray);
-            if (termFirstPosArray != null) ArrayPool<int>.Shared.Return(termFirstPosArray);
-            if (termIdfArray != null) ArrayPool<float>.Shared.Return(termIdfArray);
-        }
+        if (_setup.CoverFuzzyWords && qCount > 0 && !FuzzyWordMatcher.AllTermsFullyMatched(ref state))
+            FuzzyWordMatcher.Match(ref state, _setup);
 
         wordHits = state.WordHits;
-
-        // Compute per-token word-level IDF if cache is available
-        float[]? wordLevelIdfArray = null;
-        if (_wordIdfCache != null && qCount > 0)
-        {
-            wordLevelIdfArray = new float[qCount];
-            for (int i = 0; i < qCount; i++)
-            {
-                StringSlice tokenSlice = queryTokens[i];
-                string token = query.Substring(tokenSlice.Offset, tokenSlice.Length);
-                wordLevelIdfArray[i] = _wordIdfCache.TryGetValue(token, out float idf) ? idf : 0f;
-            }
-        }
         
         CoverageResult coverageResult = CoverageScorer.CalculateFinalScore(
             ref state,
-            queryLen,
+            context.Query.Length,
             lcsSum,
             _setup.CoverWholeQuery,
-            wordLevelIdfArray,
+            context.WordLevelIdf,
             out termsWithAnyMatch,
             out termsFullyMatched,
             out termsStrictMatched,
@@ -339,19 +351,15 @@ public class CoverageEngine
             out lastTokenHasPrefix);
         
         // Fusion signals need all tokens (no MinWordSize filtering)
-        int maxFusionQueryTokens = queryLen / 2 + 1;
-        StringSlice[]? fusionQueryTokenArray = null;
-        Span<StringSlice> fusionQueryTokens = maxFusionQueryTokens <= CoverageTokenizer.MaxStackTerms
-            ? stackalloc StringSlice[maxFusionQueryTokens]
-            : (fusionQueryTokenArray = ArrayPool<StringSlice>.Shared.Rent(maxFusionQueryTokens));
+        int maxFusionQueryTokens = context.Query.Length / 2 + 1;
+        buffer.EnsureQueryCapacity(maxFusionQueryTokens);
+        Span<StringSlice> fusionQueryTokens = buffer.FusionQueryTokenArray.AsSpan(0, maxFusionQueryTokens);
 
-        int fusionQCount = CoverageTokenizer.TokenizeToSpan(query, fusionQueryTokens, minWordSize: 0, delimiters);
+        int fusionQCount = CoverageTokenizer.TokenizeToSpan(context.Query, fusionQueryTokens, minWordSize: 0, delimiters);
 
         int maxFusionDocTokens = docLen / 2 + 1;
-        StringSlice[]? fusionDocTokenArray = null;
-        Span<StringSlice> fusionDocTokens = maxFusionDocTokens <= CoverageTokenizer.MaxStackTerms
-            ? stackalloc StringSlice[maxFusionDocTokens]
-            : fusionDocTokenArray = ArrayPool<StringSlice>.Shared.Rent(maxFusionDocTokens);
+        buffer.EnsureDocCapacity(maxFusionDocTokens);
+        Span<StringSlice> fusionDocTokens = buffer.FusionDocTokenArray.AsSpan(0, maxFusionDocTokens);
 
         int fusionDCount = CoverageTokenizer.TokenizeToSpan(documentText, fusionDocTokens, minWordSize: 0, delimiters);
 
@@ -360,23 +368,15 @@ public class CoverageEngine
             ? _documentMetadataCache.Get(documentId)
             : DocumentMetadata.Empty;
 
-        try
-        {
-            fusionSignals = FusionSignalComputer.ComputeSignals(
-                querySpan,
-                docSpan,
-                fusionQueryTokens[..fusionQCount],
-                fusionDocTokens[..fusionDCount],
-                fusionQCount,
-                fusionDCount,
-                _setup.MinWordSize,
-                docMetadata);
-        }
-        finally
-        {
-            if (fusionQueryTokenArray != null) ArrayPool<StringSlice>.Shared.Return(fusionQueryTokenArray);
-            if (fusionDocTokenArray != null) ArrayPool<StringSlice>.Shared.Return(fusionDocTokenArray);
-        }
+        fusionSignals = FusionSignalComputer.ComputeSignals(
+            querySpan,
+            docSpan,
+            fusionQueryTokens.Slice(0, fusionQCount),
+            fusionDocTokens.Slice(0, fusionDCount),
+            fusionQCount,
+            fusionDCount,
+            _setup.MinWordSize,
+            docMetadata);
 
         return coverageResult;
     }
