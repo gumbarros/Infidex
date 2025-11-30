@@ -15,6 +15,7 @@ internal unsafe struct MMapBlockPostingsEnum : IPostingsEnum
     private readonly int[] _maxDocs;
     private readonly long[] _blockOffsets;
     private readonly byte[] _maxWeights; 
+    private readonly int[] _blockCounts; // New: Block Sizes
     
     // Offset
     private readonly int _baseDocId;
@@ -37,8 +38,8 @@ internal unsafe struct MMapBlockPostingsEnum : IPostingsEnum
     public MMapBlockPostingsEnum(byte* ptr, long offset, int baseDocId = 0)
     {
         _baseDocId = baseDocId;
-        _docBuffer = new int[BlockPostingsWriter.BlockSize];
-        _weightBuffer = new byte[BlockPostingsWriter.BlockSize];
+        _docBuffer = new int[BlockPostingsWriter.MaxBlockSize];
+        _weightBuffer = new byte[BlockPostingsWriter.MaxBlockSize];
         _currentBlockIndex = -1;
         _docBufferIndex = 0;
         _docBufferCount = 0;
@@ -66,6 +67,7 @@ internal unsafe struct MMapBlockPostingsEnum : IPostingsEnum
             _maxDocs = new int[_numBlocks];
             _blockOffsets = new long[_numBlocks];
             _maxWeights = new byte[_numBlocks];
+            _blockCounts = new int[_numBlocks];
             
             byte* sp = skipTablePtr;
             for(int i=0; i<_numBlocks; i++)
@@ -74,6 +76,7 @@ internal unsafe struct MMapBlockPostingsEnum : IPostingsEnum
                 _maxDocs[i] = *(int*)sp; sp += 4;
                 _blockOffsets[i] = *(long*)sp; sp += 8;
                 _maxWeights[i] = *sp; sp += 1;
+                _blockCounts[i] = *(int*)sp; sp += 4; // Read block count
             }
         }
         else
@@ -83,6 +86,7 @@ internal unsafe struct MMapBlockPostingsEnum : IPostingsEnum
             _maxDocs = Array.Empty<int>();
             _blockOffsets = Array.Empty<long>();
             _maxWeights = Array.Empty<byte>();
+            _blockCounts = Array.Empty<int>();
         }
     }
 
@@ -108,6 +112,29 @@ internal unsafe struct MMapBlockPostingsEnum : IPostingsEnum
         if (blockIndex >= 0 && blockIndex < _numBlocks)
             return _maxWeights[blockIndex];
         return 0;
+    }
+
+    public int CurrentBlockIndex => _currentBlockIndex;
+    public int BlockCount => _numBlocks;
+
+    public int CurrentBlockMaxWeight
+    {
+        get
+        {
+            if (_currentBlockIndex >= 0 && _currentBlockIndex < _numBlocks)
+                return _maxWeights[_currentBlockIndex];
+            return 0;
+        }
+    }
+
+    public int CurrentBlockMaxDoc
+    {
+        get
+        {
+             if (_currentBlockIndex >= 0 && _currentBlockIndex < _numBlocks)
+                return _maxDocs[_currentBlockIndex];
+            return int.MaxValue;
+        }
     }
 
     public int NextDoc()
@@ -249,12 +276,7 @@ internal unsafe struct MMapBlockPostingsEnum : IPostingsEnum
         byte* docBytesPtr = p;
         p += docBytesLen;
         
-        int itemsInBlock = BlockPostingsWriter.BlockSize;
-        if (blockIndex == _numBlocks - 1)
-        {
-            int rem = _totalCount % BlockPostingsWriter.BlockSize;
-            if (rem > 0) itemsInBlock = rem;
-        }
+        int itemsInBlock = _blockCounts[blockIndex];
         
         fixed (byte* dest = _weightBuffer)
         {

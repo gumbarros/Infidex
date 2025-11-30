@@ -4,7 +4,9 @@ namespace Infidex.Indexing.Segments;
 
 internal static class BlockPostingsWriter
 {
-    public const int BlockSize = 128;
+    public const int DefaultBlockSize = 128;
+    public const int MinBlockSize = 64;
+    public const int MaxBlockSize = 256;
 
     public static void Write(BinaryWriter writer, List<int> docIds, List<byte> weights)
     {
@@ -34,23 +36,43 @@ internal static class BlockPostingsWriter
         int numBlocks = 0;
         
         // Buffers for current block
-        List<int> blockDocs = new List<int>(BlockSize);
-        List<byte> blockWeights = new List<byte>(BlockSize);
+        List<int> blockDocs = new List<int>(MaxBlockSize);
+        List<byte> blockWeights = new List<byte>(MaxBlockSize);
         
         // Skip Table Data
         List<int> minDocs = new List<int>(); // New: Min Doc
         List<int> maxDocs = new List<int>();
         List<long> blockOffsets = new List<long>();
         List<byte> blockMaxWeights = new List<byte>();
-        
+        List<int> blockCounts = new List<int>(); // Store count per block
+
         foreach (var p in postings)
         {
             blockDocs.Add(p.DocId);
             blockWeights.Add(p.Weight);
             
-            if (blockDocs.Count == BlockSize)
+            bool shouldFlush = false;
+
+            // 1. Max Limit
+            if (blockDocs.Count >= MaxBlockSize)
             {
-                FlushBlock(writer, blockDocs, blockWeights, minDocs, maxDocs, blockOffsets, blockMaxWeights);
+                shouldFlush = true;
+            }
+            // 2. Density Heuristic
+            else if (blockDocs.Count >= MinBlockSize)
+            {
+                // Check density. If the spread is large, close the block to tighten the skip interval.
+                int spread = p.DocId - blockDocs[0];
+                // Arbitrary threshold: if spread > 4x count, it's sparse.
+                if (spread > blockDocs.Count * 8) 
+                {
+                    shouldFlush = true;
+                }
+            }
+
+            if (shouldFlush)
+            {
+                FlushBlock(writer, blockDocs, blockWeights, minDocs, maxDocs, blockOffsets, blockMaxWeights, blockCounts);
                 numBlocks++;
             }
             totalCount++;
@@ -58,7 +80,7 @@ internal static class BlockPostingsWriter
         
         if (blockDocs.Count > 0)
         {
-            FlushBlock(writer, blockDocs, blockWeights, minDocs, maxDocs, blockOffsets, blockMaxWeights);
+            FlushBlock(writer, blockDocs, blockWeights, minDocs, maxDocs, blockOffsets, blockMaxWeights, blockCounts);
             numBlocks++;
         }
         
@@ -80,6 +102,7 @@ internal static class BlockPostingsWriter
             writer.Write(maxDocs[i]);
             writer.Write(blockOffsets[i]);
             writer.Write(blockMaxWeights[i]);
+            writer.Write(blockCounts[i]); // Persist variable block size
         }
         
         long endPos = writer.BaseStream.Position;
@@ -93,11 +116,12 @@ internal static class BlockPostingsWriter
         writer.BaseStream.Seek(endPos, SeekOrigin.Begin);
     }
     
-    private static void FlushBlock(BinaryWriter writer, List<int> docs, List<byte> weights, List<int> minDocs, List<int> maxDocs, List<long> blockOffsets, List<byte> blockMaxWeights)
+    private static void FlushBlock(BinaryWriter writer, List<int> docs, List<byte> weights, List<int> minDocs, List<int> maxDocs, List<long> blockOffsets, List<byte> blockMaxWeights, List<int> blockCounts)
     {
         blockOffsets.Add(writer.BaseStream.Position);
         minDocs.Add(docs[0]);
         maxDocs.Add(docs[docs.Count - 1]);
+        blockCounts.Add(docs.Count);
         
         byte maxW = 0;
         foreach(var w in weights) if(w > maxW) maxW = w;

@@ -16,6 +16,8 @@ public class TopKHeap
 
     public int Count => _heap.Count;
 
+    public float MinScore => _heap.Count > 0 ? _heap.Peek().Score : 0f;
+
     public void Add(ScoreEntry entry)
     {
         if (_heap.Count < _limit)
@@ -56,4 +58,3 @@ public class TopKHeap
         _heap.Clear();
     }
 }
-
