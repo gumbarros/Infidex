@@ -23,7 +23,7 @@ internal sealed class SearchPipeline
     private const int ShortQueryMaxLength = 3;
     private const int ShortQueryCoverageDocCap = 500;
 
-    public static bool EnableDebugLogging => FusionScorer.EnableDebugLogging;
+    private bool EnableDebugLogging => _vectorModel.EnableDebugLogging || FusionScorer.EnableDebugLogging;
 
     public SearchPipeline(
         VectorModel vectorModel,
@@ -159,10 +159,10 @@ internal sealed class SearchPipeline
             skipCoverageDueToShortQueryDocCap)
         {
 #if DEBUG
-            long overhead = stage1TotalMs - (tfidfMs + consolidateMs);
-            Console.WriteLine($"[TIMING] total={perfStopwatch.ElapsedMilliseconds}ms (norm={normMs}ms, stage1={stage1TotalMs}ms [tfidf={tfidfMs}ms, consolidate={consolidateMs}ms, overhead={overhead}ms]) - NO COVERAGE");
             if (EnableDebugLogging)
             {
+                long overhead = stage1TotalMs - (tfidfMs + consolidateMs);
+                Console.WriteLine($"[TIMING] total={perfStopwatch.ElapsedMilliseconds}ms (norm={normMs}ms, stage1={stage1TotalMs}ms [tfidf={tfidfMs}ms, consolidate={consolidateMs}ms, overhead={overhead}ms]) - NO COVERAGE");
                 Console.WriteLine("[PIPE] Returning Stage1 results without coverage.");
             }
 #endif
@@ -187,20 +187,22 @@ internal sealed class SearchPipeline
             if (EnableDebugLogging)
             {
                 Console.WriteLine("[DEBUG] Coverage produced 0 results; falling back to TF-IDF backbone results.");
+                long s1Overhead = stage1TotalMs - (tfidfMs + consolidateMs);
+                long covOverhead = coverageTotalMs - (topKMs + prescreenMs + wmLookupMs + docIdxMs + prepMs + wordMatcherCoverageMs + tfidfCoverageMs + truncationMs);
+                Console.WriteLine($"[TIMING] total={perfStopwatch.ElapsedMilliseconds}ms (norm={normMs}ms, stage1={stage1TotalMs}ms [tfidf={tfidfMs}ms, consolidate={consolidateMs}ms, oh={s1Overhead}ms], coverage={coverageTotalMs}ms [topK={topKMs}ms, prescreen={prescreenMs}ms, wmLup={wmLookupMs}ms, docIdx={docIdxMs}ms, prep={prepMs}ms, wmCov={wordMatcherCoverageMs}ms, tfidfCov={tfidfCoverageMs}ms, trunc={truncationMs}ms, oh={covOverhead}ms]) - FALLBACK");
             }
-
-            long s1Overhead = stage1TotalMs - (tfidfMs + consolidateMs);
-            long covOverhead = coverageTotalMs - (topKMs + prescreenMs + wmLookupMs + docIdxMs + prepMs + wordMatcherCoverageMs + tfidfCoverageMs + truncationMs);
-            Console.WriteLine($"[TIMING] total={perfStopwatch.ElapsedMilliseconds}ms (norm={normMs}ms, stage1={stage1TotalMs}ms [tfidf={tfidfMs}ms, consolidate={consolidateMs}ms, oh={s1Overhead}ms], coverage={coverageTotalMs}ms [topK={topKMs}ms, prescreen={prescreenMs}ms, wmLup={wmLookupMs}ms, docIdx={docIdxMs}ms, prep={prepMs}ms, wmCov={wordMatcherCoverageMs}ms, tfidfCov={tfidfCoverageMs}ms, trunc={truncationMs}ms, oh={covOverhead}ms]) - FALLBACK");
 #endif
             return stage1Results;
         }
 
 #if DEBUG
-        long overhead1 = stage1TotalMs - (tfidfMs + consolidateMs);
-        long coverageOverhead = coverageTotalMs - (topKMs + prescreenMs + wmLookupMs + docIdxMs + prepMs + wordMatcherCoverageMs + tfidfCoverageMs + truncationMs);
-        long totalOverhead = perfStopwatch.ElapsedMilliseconds - (stage1TotalMs + coverageTotalMs);
-        Console.WriteLine($"[TIMING] total={perfStopwatch.ElapsedMilliseconds}ms (norm={normMs}ms, stage1={stage1TotalMs}ms [tfidf={tfidfMs}ms, consolidate={consolidateMs}ms, oh={overhead1}ms], coverage={coverageTotalMs}ms [topK={topKMs}ms, prescreen={prescreenMs}ms, wmLup={wmLookupMs}ms, docIdx={docIdxMs}ms, prep={prepMs}ms, wmCov={wordMatcherCoverageMs}ms, tfidfCov={tfidfCoverageMs}ms, trunc={truncationMs}ms, oh={coverageOverhead}ms], finalOH={totalOverhead}ms)");
+        if (EnableDebugLogging)
+        {
+            long overhead1 = stage1TotalMs - (tfidfMs + consolidateMs);
+            long coverageOverhead = coverageTotalMs - (topKMs + prescreenMs + wmLookupMs + docIdxMs + prepMs + wordMatcherCoverageMs + tfidfCoverageMs + truncationMs);
+            long totalOverhead = perfStopwatch.ElapsedMilliseconds - (stage1TotalMs + coverageTotalMs);
+            Console.WriteLine($"[TIMING] total={perfStopwatch.ElapsedMilliseconds}ms (norm={normMs}ms, stage1={stage1TotalMs}ms [tfidf={tfidfMs}ms, consolidate={consolidateMs}ms, oh={overhead1}ms], coverage={coverageTotalMs}ms [topK={topKMs}ms, prescreen={prescreenMs}ms, wmLup={wmLookupMs}ms, docIdx={docIdxMs}ms, prep={prepMs}ms, wmCov={wordMatcherCoverageMs}ms, tfidfCov={tfidfCoverageMs}ms, trunc={truncationMs}ms, oh={coverageOverhead}ms], finalOH={totalOverhead}ms)");
+        }
 #endif
         return coverageResults;
     }
@@ -278,7 +280,6 @@ internal sealed class SearchPipeline
             if (string.IsNullOrWhiteSpace(tfidfQuery))
                 tfidfQuery = searchText;
 
-            _vectorModel.EnableDebugLogging = EnableDebugLogging;
             relevancyScores = _vectorModel.SearchWithMaxScore(tfidfQuery, coverageDepth, bestSegmentsMap, queryIndex: 0);
         }
 

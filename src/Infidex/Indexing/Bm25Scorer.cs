@@ -44,13 +44,14 @@ internal static class Bm25Scorer
         Dictionary<int, byte>? bestSegmentsMap,
         int queryIndex,
         ShortQuery.PositionalPrefixIndex? prefixIndex = null,
-        string? originalQuery = null)
+        string? originalQuery = null,
+        bool enableDebugLogging = false)
     {
         float avgdl = avgDocLength > 0f ? avgDocLength : 1f;
         TermScoreInfo[] termInfos = ComputeTermScores(queryTerms, totalDocs, avgdl);
         Array.Sort(termInfos, (a, b) => b.MaxScore.CompareTo(a.MaxScore));
 
-        return Search(termInfos, topK, totalDocs, docLengths, avgdl, stopTermLimit, documents, bestSegmentsMap, queryIndex, prefixIndex, originalQuery);
+        return Search(termInfos, topK, totalDocs, docLengths, avgdl, stopTermLimit, documents, bestSegmentsMap, queryIndex, prefixIndex, originalQuery, enableDebugLogging);
     }
 
     public static TopKHeap Search(
@@ -64,10 +65,10 @@ internal static class Bm25Scorer
         Dictionary<int, byte>? bestSegmentsMap,
         int queryIndex,
         ShortQuery.PositionalPrefixIndex? prefixIndex = null,
-        string? originalQuery = null)
+        string? originalQuery = null,
+        bool enableDebugLogging = false)
     {
-        bool enableLogging = FusionScorer.EnableDebugLogging;
-        Stopwatch? sw = enableLogging ? Stopwatch.StartNew() : null;
+        Stopwatch? sw = enableDebugLogging ? Stopwatch.StartNew() : null;
         TopKHeap resultHeap = new TopKHeap(topK);
 
         if (termInfos.Length == 0 || totalDocs == 0)
@@ -79,12 +80,12 @@ internal static class Bm25Scorer
         float[] upperBounds = ArrayPool<float>.Shared.Rent(totalDocs);
         Array.Clear(upperBounds, 0, totalDocs);
 
-        Stopwatch? candSw = enableLogging ? Stopwatch.StartNew() : null;
+        Stopwatch? candSw = enableDebugLogging ? Stopwatch.StartNew() : null;
         RoaringBitmap candidates;
         try
         {
             candidates = TieredCandidateSelector.SelectCandidates(
-                termInfos, topK, totalDocs, avgdl, prefixIndex, originalQuery, upperBounds);
+                termInfos, topK, totalDocs, avgdl, prefixIndex, originalQuery, upperBounds, enableDebugLogging);
         }
         catch
         {
@@ -96,7 +97,7 @@ internal static class Bm25Scorer
         long candidateCount = candidates.Cardinality;
         bool useTieredSelection = candidateCount > 0;
 
-        if (enableLogging)
+        if (enableDebugLogging)
         {
             Console.WriteLine($"[TF-IDF-INST] Candidate Selection: {candSw?.Elapsed.TotalMilliseconds:F3}ms, Candidates: {candidateCount}");
         }
@@ -107,7 +108,7 @@ internal static class Bm25Scorer
         PriorityQueue<int, float> pruningHeap = new PriorityQueue<int, float>();
         float threshold = 0f;
 
-        Stopwatch? scoringSw = enableLogging ? Stopwatch.StartNew() : null;
+        Stopwatch? scoringSw = enableDebugLogging ? Stopwatch.StartNew() : null;
         long totalAdvance = 0;
         long totalNextDoc = 0;
 
@@ -182,7 +183,7 @@ internal static class Bm25Scorer
         }
         
         scoringSw?.Stop();
-        if (enableLogging)
+        if (enableDebugLogging)
         {
             Console.WriteLine($"[TF-IDF-INST] Scoring Loop: {scoringSw?.Elapsed.TotalMilliseconds:F3}ms");
             Console.WriteLine($"[TF-IDF-INST] Stats: Advance={totalAdvance}, NextDoc={totalNextDoc}");

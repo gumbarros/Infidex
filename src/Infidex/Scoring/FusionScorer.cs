@@ -8,7 +8,7 @@ namespace Infidex.Scoring;
 /// </summary>
 internal static class FusionScorer
 {
-    internal static bool EnableDebugLogging = true;
+    internal static bool EnableDebugLogging = false;
 
     private const float IntentBonusPerSignal = 0.15f;
 

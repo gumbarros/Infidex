@@ -37,7 +37,8 @@ internal class TieredCandidateSelector
         float avgDocLength,
         PositionalPrefixIndex? prefixIndex,
         string? originalQuery,
-        float[] upperBounds)
+        float[] upperBounds,
+        bool enableDebugLogging = false)
     {
         var termInfos = new Indexing.Bm25Scorer.TermScoreInfo[queryTerms.Count];
         for (int i = 0; i < queryTerms.Count; i++)
@@ -47,7 +48,7 @@ internal class TieredCandidateSelector
             float maxScore = idf * 2.2f;
             termInfos[i] = new Indexing.Bm25Scorer.TermScoreInfo(t, idf, maxScore);
         }
-        return SelectCandidates(termInfos, topK, totalDocs, avgDocLength, prefixIndex, originalQuery, upperBounds);
+        return SelectCandidates(termInfos, topK, totalDocs, avgDocLength, prefixIndex, originalQuery, upperBounds, enableDebugLogging);
     }
 
     public static RoaringBitmap SelectCandidates(
@@ -57,7 +58,8 @@ internal class TieredCandidateSelector
         float avgDocLength,
         PositionalPrefixIndex? prefixIndex,
         string? originalQuery,
-        float[] upperBounds)
+        float[] upperBounds,
+        bool enableDebugLogging = false)
     {
         if (queryTerms.Length == 0)
             return RoaringBitmap.Create();
@@ -133,7 +135,7 @@ internal class TieredCandidateSelector
         if (terms.Count >= 2)
         {
             float tier0UpperBound = terms.Sum(t => t.MaxScore);
-            RoaringBitmap tier0 = IntersectTerms(terms, tier0UpperBound, upperBounds);
+            RoaringBitmap tier0 = IntersectTerms(terms, tier0UpperBound, upperBounds, enableDebugLogging);
             globalCandidates |= tier0;
 
             if (globalCandidates.Cardinality >= topK * 2)
@@ -145,7 +147,7 @@ internal class TieredCandidateSelector
         {
             List<TermInfo> tier1Terms = terms.Take(terms.Count - 1).ToList();
             float tier1UpperBound = tier1Terms.Sum(t => t.MaxScore);
-            RoaringBitmap tier1 = IntersectTerms(tier1Terms, tier1UpperBound, upperBounds);
+            RoaringBitmap tier1 = IntersectTerms(tier1Terms, tier1UpperBound, upperBounds, enableDebugLogging);
             globalCandidates |= tier1;
         }
 
@@ -328,7 +330,8 @@ internal class TieredCandidateSelector
     private static RoaringBitmap IntersectTerms(
         List<TermInfo> terms,
         float tierUpperBound,
-        float[] upperBounds)
+        float[] upperBounds,
+        bool enableDebugLogging)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
         if (terms.Count == 0)
@@ -407,7 +410,7 @@ internal class TieredCandidateSelector
         End:
             sw.Stop();
 #if DEBUG
-            if (sw.ElapsedMilliseconds > 5)
+            if (enableDebugLogging && sw.ElapsedMilliseconds > 5)
             {
                 Console.WriteLine($"[DEBUG] IntersectAllTerms: {sw.ElapsedMilliseconds}ms, Advance calls: {advanceCalls}, DriverCost: {driver.Cost()}");
             }

@@ -55,6 +55,10 @@ public class VectorModel : IDisposable
     internal Dictionary<string, float>? WordIdfCache { get; private set; }
 
     public event EventHandler<int>? ProgressChanged;
+
+    /// <summary>
+    /// Enables diagnostic console logging for this model. Disabled by default.
+    /// </summary>
     public bool EnableDebugLogging { get; set; }
 
     public VectorModel(Tokenizer tokenizer, int stopTermLimit = 1_250_000, float[]? fieldWeights = null, SynonymMap? synonymMap = null)
@@ -375,7 +379,7 @@ public class VectorModel : IDisposable
 
     internal TopKHeap SearchWithMaxScore(string queryText, int topK, Dictionary<int, byte>? bestSegmentsMap = null, int queryIndex = 0)
     {
-        bool enableLogging = Infidex.Scoring.FusionScorer.EnableDebugLogging;
+        bool enableLogging = EnableDebugLogging || Infidex.Scoring.FusionScorer.EnableDebugLogging;
         System.Diagnostics.Stopwatch? sw = enableLogging ? System.Diagnostics.Stopwatch.StartNew() : null;
         
         RawToken[] rentedArray = System.Buffers.ArrayPool<RawToken>.Shared.Rent(128);
@@ -566,7 +570,7 @@ public class VectorModel : IDisposable
 
             TopKHeap resultHeap = Bm25Scorer.Search(
                 activeTermInfos.ToArray(), 
-                topK, totalDocs, _docLengths!, _avgDocLength, _stopTermLimit, Documents, bestSegmentsMap, queryIndex, _shortQueryIndex, queryText);
+                topK, totalDocs, _docLengths!, _avgDocLength, _stopTermLimit, Documents, bestSegmentsMap, queryIndex, _shortQueryIndex, queryText, enableLogging);
 
             long memSearchMs = (sw?.ElapsedMilliseconds ?? 0) - prepMs - fuzzyMs - statsMs - tokenizeMs;
 
@@ -576,7 +580,7 @@ public class VectorModel : IDisposable
 
                 TopKHeap segHeap = Bm25Scorer.Search(
                     segmentTermInfos[i].ToArray(),
-                    topK, totalDocs, _docLengths!, _avgDocLength, _stopTermLimit, Documents, bestSegmentsMap, queryIndex, _shortQueryIndex, queryText);
+                    topK, totalDocs, _docLengths!, _avgDocLength, _stopTermLimit, Documents, bestSegmentsMap, queryIndex, _shortQueryIndex, queryText, enableLogging);
                 
                 foreach (var entry in segHeap.GetTopK())
                 {
