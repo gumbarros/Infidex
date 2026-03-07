@@ -456,6 +456,10 @@ internal sealed class WordMatcher : IDisposable
     public void Load(BinaryReader reader)
     {
         Clear();
+        _exactBuilder = null;
+        _ld1Builder = null;
+        _fstTermToDocIdsBuilder = null;
+        _fstBuilder = null;
         
         // Load Exact Index
         int exactCount = reader.ReadInt32();

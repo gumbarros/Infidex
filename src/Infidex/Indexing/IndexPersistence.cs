@@ -344,10 +344,16 @@ internal static class IndexPersistence
     
     private static void WriteTerms(BinaryWriter writer, TermCollection terms)
     {
-        IEnumerable<Term> allTerms = terms.GetAllTerms();
-        
-        // Count non-stop terms
-        List<Term> termList = allTerms.Where(t => t.DocumentFrequency > 0).ToList();
+        // Terms must be serialized in their internal ordinal order because
+        // persisted FST outputs refer to these exact term indexes.
+        List<Term> termList = new List<Term>(terms.Count);
+        for (int i = 0; i < terms.Count; i++)
+        {
+            Term? term = terms.GetTermByIndex(i);
+            if (term != null)
+                termList.Add(term);
+        }
+
         writer.Write(termList.Count);
         
         foreach (Term term in termList)
@@ -376,7 +382,10 @@ internal static class IndexPersistence
     private static void ReadTerms(BinaryReader reader, TermCollection terms, int stopTermLimit, int expectedCount)
     {
         int count = reader.ReadInt32();
-        // Note: count may differ from expectedCount due to stop terms
+        if (count != expectedCount)
+        {
+            throw new InvalidDataException($"Term count mismatch: header says {expectedCount}, data has {count}");
+        }
         
         for (int i = 0; i < count; i++)
         {
